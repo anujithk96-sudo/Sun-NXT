@@ -232,9 +232,28 @@ def run_yt_dlp(url: str, out_file: str, quality_key: str, mp3_bitrate: str, canc
             lines.extend(x.strip() for x in proc.stdout.readlines())
         if proc.returncode != 0:
             error = "\n".join(x for x in lines if x)[-700:] or "yt-dlp ഡൗൺലോഡ് പരാജയപ്പെടുത്തി."
-            # DRM-protected streams are not decrypted or bypassed by this bot.
-            if re.search(r"drm|widevine|encrypted|no formats found|unsupported url", error, re.I):
-                error = "ഈ ലിങ്ക് DRM/സംരക്ഷിത സ്ട്രീം ആയിരിക്കാം, അല്ലെങ്കിൽ yt-dlp പിന്തുണയ്ക്കുന്നില്ല. DRM മറികടക്കൽ ഈ ബോട്ടിൽ ചെയ്യില്ല."
+            # Do not label every extractor/format error as DRM. Only report DRM when
+            # yt-dlp explicitly identifies DRM/encryption; preserve other diagnostics.
+            if re.search(r"\b(drm|widevine|encrypted|encryption)\b", error, re.I):
+                error = (
+                    "സ്ട്രീം DRM/encryption സംരക്ഷണമുള്ളതായി yt-dlp റിപ്പോർട്ട് ചെയ്തു. "
+                    "ബോട്ട് DRM മറികടക്കുകയോ ഡീക്രിപ്റ്റ് ചെയ്യുകയോ ചെയ്യില്ല. "
+                    "ആപ്പ് playback ലഭ്യമാണെന്നത് downloadable format ലഭ്യമാണെന്ന് ഉറപ്പാക്കുന്നില്ല.\n\n"
+                    f"yt-dlp വിശദാംശം: {error[-450:]}"
+                )
+            elif re.search(r"no formats found|requested format is not available", error, re.I):
+                error = (
+                    "yt-dlp-ന് ഈ ലിങ്കിൽ പിന്തുണയ്ക്കുന്ന downloadable format കണ്ടെത്താനായില്ല. "
+                    "ഇത് മാത്രം DRM ആണെന്ന് തെളിയിക്കുന്നില്ല; Sun NXT extractor/format support "
+                    "അല്ലെങ്കിൽ login/cookie പ്രശ്നമായിരിക്കാം.\n\n"
+                    f"yt-dlp വിശദാംശം: {error[-450:]}"
+                )
+            elif re.search(r"unsupported url", error, re.I):
+                error = (
+                    "ഈ Sun NXT URL നിലവിലെ yt-dlp പതിപ്പ് പിന്തുണയ്ക്കുന്നില്ല. "
+                    "ഇത് DRM ആണെന്ന് മാത്രം അർത്ഥമാക്കുന്നില്ല.\n\n"
+                    f"yt-dlp വിശദാംശം: {error[-450:]}"
+                )
             return False, error, None
         parent = Path(out_file).parent
         stem = Path(out_file).stem
