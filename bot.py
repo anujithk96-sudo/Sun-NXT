@@ -30,6 +30,7 @@ ALLOWED_IDS = set(map(int, os.getenv("ALLOWED_USER_IDS", "").split(","))) if os.
 USER_URLS = {}
 USER_THUMBNAILS = {}
 USER_STATES = {}
+USER_AVAILABLE_QUALITIES = {}
 active_downloads = {}
 CANCEL_REQUESTS = set()
 
@@ -336,15 +337,44 @@ async def handle_user_inputs(client, message):
                 'skip_download': True,
                 'noplaylist': True,
                 'cookiefile': cookie_file_path,
-                'nocheckcertificate': True
+                'nocheckcertificate': True,
+                'socket_timeout': 15,
+                'retries': 1,
+                'extractor_retries': 1,
+                'fragment_retries': 1,
             }
 
             def extract_info_fast():
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     return ydl.extract_info(url, download=False)
 
-            info = await asyncio.to_thread(extract_info_fast)
+            # Bound metadata lookup so a stalled extractor does not leave the bot
+            # displaying 'Fetching video info...' forever.
+            info = await asyncio.wait_for(asyncio.to_thread(extract_info_fast), timeout=45)
             title = info.get('title', 'OTT Video')
+
+            # Only offer qualities yt-dlp actually reports as available and
+            # non-DRM. This does not attempt to decrypt or bypass DRM.
+            formats = info.get('formats') or []
+            if info.get('has_drm') or (formats and all(f.get('has_drm') for f in formats)):
+                await status_msg.edit_text(
+                    '🔒 This video is marked as DRM-protected. This bot cannot download or bypass its protection.'
+                )
+                return
+            available_heights = sorted(
+                {int(f.get('height')) for f in formats
+                 if f.get('height') and f.get('url') and not f.get('has_drm')},
+                reverse=True
+            )
+            quality_choices = [h for h in (2160, 1080, 720, 576, 480, 360, 240)
+                               if h in available_heights]
+            if not quality_choices:
+                await status_msg.edit_text(
+                    '❌ No downloadable non-DRM video formats were returned for this link. ' 
+                    'The service may require an official app/player or protect this title with DRM.'
+                )
+                return
+            USER_AVAILABLE_QUALITIES[user_id] = quality_choices
             thumbnail_url = info.get('thumbnail')
             if not thumbnail_url and 'thumbnails' in info:
                 thumbnails = info.get('thumbnails', [])
@@ -357,21 +387,13 @@ async def handle_user_inputs(client, message):
             if yt_thumb_path:
                 USER_THUMBNAILS[f"yt_{user_id}"] = yt_thumb_path
 
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🎵 Extract MP3 Audio", callback_data="dl|audio|mp3|all")],
-                [
-                    InlineKeyboardButton("📹 240p", callback_data="dl|video|240"),
-                    InlineKeyboardButton("📹 360p", callback_data="dl|video|360")
-                ],
-                [
-                    InlineKeyboardButton("📹 480p", callback_data="dl|video|480"),
-                    InlineKeyboardButton("📹 576p", callback_data="dl|video|576")
-                ],
-                [
-                    InlineKeyboardButton("📹 720p", callback_data="dl|video|720"),
-                    InlineKeyboardButton("📹 1080p", callback_data="dl|video|1080")
-                ]
-            ])
+            quality_rows = []
+            for i in range(0, len(quality_choices), 2):
+                row = [InlineKeyboardButton(
+                    f"📹 {h}p", callback_data=f"dl|video|{h}"
+                ) for h in quality_choices[i:i+2]]
+                quality_rows.append(row)
+            keyboard = InlineKeyboardMarkup(quality_rows)
 
             caption_text = f"🎬 <b>{title}</b>\n\n👇 <b>Select your preferred quality:</b>"
 
@@ -387,7 +409,12 @@ async def handle_user_inputs(client, message):
 
         except Exception as e:
             logging.exception("Info extraction error: %s", e)
-            await status_msg.edit_text(f"❌ Could not fetch video info.\n\nReason: <code>{html.escape(str(e)[:500])}</code>", parse_mode="html")
+            reason = 'Metadata lookup timed out after 45 seconds.' if isinstance(e, asyncio.TimeoutError) else str(e)
+            await status_msg.edit_text(
+                f"❌ Could not fetch video info.\n\nReason: <code>{html.escape(reason[:500])}</code>\n\n"
+                'If this is a DRM-protected Sun NXT title, quality buttons cannot be generated from it.' ,
+                parse_mode="html"
+            )
     else:
         await message.reply_text("❌ Please send a valid OTT link or use /rip command.")
 
@@ -401,6 +428,9 @@ async def select_audio_languages(client, callback_query: CallbackQuery):
 
     if not user_data:
         await callback_query.message.edit_text("❌ Link expired. Please send the link again.")
+        return
+    if int(quality) not in USER_AVAILABLE_QUALITIES.get(user_id, []):
+        await callback_query.answer("This quality is not available for this link.", show_alert=True)
         return
 
     detected_langs = ["mal", "tam", "hin", "eng", "tel", "kan"]
