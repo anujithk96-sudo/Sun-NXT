@@ -346,7 +346,8 @@ async def handle_user_inputs(client, message):
 
         status_msg = await message.reply_text("⏳ Fetching video info & original thumbnail... Please wait!")
 
-        cookie_file_path = "cookies.txt" if os.path.exists("cookies.txt") else None
+        configured_cookie_file = os.getenv("COOKIE_FILE", "cookies.txt")
+        cookie_file_path = configured_cookie_file if os.path.isfile(configured_cookie_file) else None
 
         try:
             ydl_opts = {
@@ -354,20 +355,33 @@ async def handle_user_inputs(client, message):
                 'no_warnings': True,
                 'skip_download': True,
                 'noplaylist': True,
-                'cookiefile': cookie_file_path,
                 'nocheckcertificate': True,
-                'socket_timeout': 15,
+                'socket_timeout': 10,
                 'retries': 1,
                 'extractor_retries': 1,
                 'fragment_retries': 1,
             }
+            # Only pass cookiefile when a real cookie file exists. Passing None
+            # can cause extractor/configuration errors in some yt-dlp versions.
+            if cookie_file_path:
+                ydl_opts['cookiefile'] = cookie_file_path
 
             def extract_info_fast():
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     return ydl.extract_info(url, download=False)
 
-            info = await asyncio.wait_for(asyncio.to_thread(extract_info_fast), timeout=60)
-            title = html.escape(str(info.get('title', 'OTT Video')))
+            # Give fast extractors a chance to finish immediately. If metadata
+            # takes longer than 5 seconds, tell the user that the check continues
+            # instead of leaving the original "Please wait" message unchanged.
+            info_task = asyncio.create_task(asyncio.to_thread(extract_info_fast))
+            done, _ = await asyncio.wait({info_task}, timeout=5)
+            if not done:
+                await status_msg.edit_text(
+                    "⏳ Video details are taking longer than 5 seconds. "
+                    "Still checking available, downloadable qualities..."
+                )
+            info = await asyncio.wait_for(info_task, timeout=40)
+            title = html.escape(str(info.get('title') or 'OTT Video'))
 
             formats = info.get('formats') or []
             if info.get('has_drm') or (formats and all(f.get('has_drm') for f in formats)):
@@ -378,7 +392,9 @@ async def handle_user_inputs(client, message):
 
             heights_set = set()
             for f in formats:
-                if not f.get('url') or f.get('has_drm'):
+                # A format may have a format_id but no resolved URL until
+                # yt-dlp starts downloading it; don't discard it for that reason.
+                if f.get('has_drm') or not f.get('format_id'):
                     continue
                 if f.get('height'):
                     heights_set.add(int(f.get('height')))
@@ -389,11 +405,14 @@ async def handle_user_inputs(client, message):
                     except ValueError:
                         pass
 
-            available_heights = sorted(heights_set, reverse=True)
-            quality_choices = [
-                h for h in (2160, 1080, 720, 576, 480, 360, 240)
-                if h in available_heights
-            ]
+            # Some extractors expose only the overall height, not a formats list.
+            if info.get('height'):
+                try:
+                    heights_set.add(int(info['height']))
+                except (TypeError, ValueError):
+                    pass
+
+            quality_choices = sorted(heights_set, reverse=True)
 
             if not quality_choices:
                 await status_msg.edit_text(
@@ -420,13 +439,13 @@ async def handle_user_inputs(client, message):
 
             if thumbnail_url:
                 try:
-                    await message.reply_photo(photo=thumbnail_url, caption=caption_text, reply_markup=keyboard)
+                    await message.reply_photo(photo=thumbnail_url, caption=caption_text, reply_markup=keyboard, parse_mode="html")
                     await status_msg.delete()
                     return
                 except Exception:
                     pass
 
-            await status_msg.edit_text(caption_text, reply_markup=keyboard)
+            await status_msg.edit_text(caption_text, reply_markup=keyboard, parse_mode="html")
 
         except Exception as e:
             logging.exception("Info extraction error: %s", e)
@@ -528,7 +547,21 @@ async def download_final_media(client, callback_query: CallbackQuery):
                 if user_id in CANCEL_REQUESTS:
                     raise Exception("Task cancelled by user.")
                 info = ydl.extract_info(url, download=True)
-                return ydl.prepare_filename(info)
+                requested = info.get('requested_downloads') or []
+                if requested:
+                    for item in requested:
+                        candidate = item.get('filepath') or item.get('_filename')
+                        if candidate and os.path.exists(candidate):
+                            return candidate
+                candidate = info.get('_filename') or ydl.prepare_filename(info)
+                if os.path.exists(candidate):
+                    return candidate
+                # yt-dlp may merge streams and change the extension.
+                stem = os.path.splitext(candidate)[0]
+                for ext in ('.mp4', '.mkv', '.webm', '.mov'):
+                    if os.path.exists(stem + ext):
+                        return stem + ext
+                return candidate
 
         filename = await asyncio.to_thread(run_download)
 

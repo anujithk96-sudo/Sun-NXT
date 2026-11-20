@@ -2,7 +2,7 @@
 
 ## Included files
 - `bot.py` — Telegram bot source.
-- `cookies.txt` — your supplied browser cookies (keep private; do not publish/share them).
+- `cookies.txt` — optional private browser cookies file; not included in this ZIP.
 - `requirements.txt` — Python dependencies.
 - `.env.example` — environment-variable template.
 - `run.sh` — Termux setup/run helper.
@@ -27,7 +27,7 @@
    nano .env
    ```
 4. Confirm `cookies.txt` is in the same folder as `bot.py` (or set `COOKIE_FILE` in `.env`).
-5. Run:
+5. Copy `.env.example` to `.env` and add your own Telegram credentials.\n6. If needed, put your own authorized `cookies.txt` beside `bot.py`.\n7. Run:
    ```sh
    chmod +x run.sh
    ./run.sh
