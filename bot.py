@@ -17,11 +17,9 @@ from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQ
 
 load_dotenv()
 
-# ലോഗിങ് സെറ്റ് ചെയ്യുക
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# എൻവയോൺമെന്റ് വേരിയബിളുകൾ
 API_ID = os.environ.get("API_ID")
 API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
@@ -139,6 +137,16 @@ def get_progress_hook(client, message, user_id, title="Downloading"):
                 last_update_time = current_time
     return progress_hook
 
+def build_quality_keyboard(quality_choices):
+    quality_rows = []
+    for i in range(0, len(quality_choices), 2):
+        row = [
+            InlineKeyboardButton(f"📹 {h}p", callback_data=f"dl|video|{h}")
+            for h in quality_choices[i:i+2]
+        ]
+        quality_rows.append(row)
+    return InlineKeyboardMarkup(quality_rows)
+
 app = Client(
     "jiohotstar_bot",
     api_id=int(API_ID) if API_ID and API_ID.isdigit() else 0,
@@ -153,7 +161,7 @@ async def start(client, message):
         return
 
     text = (
-        "🎬 OTT Downloader Bot\n\n"
+        "🎬 OTT Allu Downloader Bot\n\n"
         "Send supported OTT links (including Sun NXT) to check available media via Telegram.\n\n"
         "Quick commands:\n"
         "/rip <platform> <url> — Start a download\n"
@@ -309,6 +317,16 @@ async def cancel_task_callback(client, callback_query: CallbackQuery):
     else:
         await callback_query.answer("❌ You are not authorized to cancel this task!", show_alert=True)
 
+@app.on_callback_query(filters.regex("^back_to_quality$"))
+async def back_to_quality_callback(client, callback_query: CallbackQuery):
+    user_id = callback_query.from_user.id
+    quality_choices = USER_AVAILABLE_QUALITIES.get(user_id)
+    if not quality_choices:
+        await callback_query.answer("Quality list expired. Please send the link again.", show_alert=True)
+        return
+    await callback_query.message.edit_reply_markup(build_quality_keyboard(quality_choices))
+    await callback_query.answer()
+
 @app.on_message(filters.private & ~filters.command(["start", "help", "platforms", "rip", "status", "cancel"]))
 async def handle_user_inputs(client, message):
     user_id = message.from_user.id
@@ -325,7 +343,7 @@ async def handle_user_inputs(client, message):
         custom_name = parts[1].strip() if len(parts) > 1 else None
 
         USER_URLS[user_id] = {"url": url, "custom_name": custom_name}
-        
+
         status_msg = await message.reply_text("⏳ Fetching video info & original thumbnail... Please wait!")
 
         cookie_file_path = "cookies.txt" if os.path.exists("cookies.txt") else None
@@ -348,32 +366,42 @@ async def handle_user_inputs(client, message):
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     return ydl.extract_info(url, download=False)
 
-            # Bound metadata lookup so a stalled extractor does not leave the bot
-            # displaying 'Fetching video info...' forever.
-            info = await asyncio.wait_for(asyncio.to_thread(extract_info_fast), timeout=45)
-            title = info.get('title', 'OTT Video')
+            info = await asyncio.wait_for(asyncio.to_thread(extract_info_fast), timeout=60)
+            title = html.escape(str(info.get('title', 'OTT Video')))
 
-            # Only offer qualities yt-dlp actually reports as available and
-            # non-DRM. This does not attempt to decrypt or bypass DRM.
             formats = info.get('formats') or []
             if info.get('has_drm') or (formats and all(f.get('has_drm') for f in formats)):
                 await status_msg.edit_text(
-                    '🔒 This video is marked as DRM-protected. This bot cannot download or bypass its protection.'
+                    '🔒 This video is marked as DRM-protected. Quality buttons cannot be generated.'
                 )
                 return
-            available_heights = sorted(
-                {int(f.get('height')) for f in formats
-                 if f.get('height') and f.get('url') and not f.get('has_drm')},
-                reverse=True
-            )
-            quality_choices = [h for h in (2160, 1080, 720, 576, 480, 360, 240)
-                               if h in available_heights]
+
+            heights_set = set()
+            for f in formats:
+                if not f.get('url') or f.get('has_drm'):
+                    continue
+                if f.get('height'):
+                    heights_set.add(int(f.get('height')))
+                elif f.get('resolution') and 'x' in str(f.get('resolution')):
+                    try:
+                        h_val = int(str(f.get('resolution')).split('x')[-1])
+                        heights_set.add(h_val)
+                    except ValueError:
+                        pass
+
+            available_heights = sorted(heights_set, reverse=True)
+            quality_choices = [
+                h for h in (2160, 1080, 720, 576, 480, 360, 240)
+                if h in available_heights
+            ]
+
             if not quality_choices:
                 await status_msg.edit_text(
-                    '❌ No downloadable non-DRM video formats were returned for this link. ' 
-                    'The service may require an official app/player or protect this title with DRM.'
+                    '❌ No downloadable non-DRM video formats were returned for this link.\n'
+                    'The title may be DRM-protected or require valid cookies/session.'
                 )
                 return
+
             USER_AVAILABLE_QUALITIES[user_id] = quality_choices
             thumbnail_url = info.get('thumbnail')
             if not thumbnail_url and 'thumbnails' in info:
@@ -387,14 +415,7 @@ async def handle_user_inputs(client, message):
             if yt_thumb_path:
                 USER_THUMBNAILS[f"yt_{user_id}"] = yt_thumb_path
 
-            quality_rows = []
-            for i in range(0, len(quality_choices), 2):
-                row = [InlineKeyboardButton(
-                    f"📹 {h}p", callback_data=f"dl|video|{h}"
-                ) for h in quality_choices[i:i+2]]
-                quality_rows.append(row)
-            keyboard = InlineKeyboardMarkup(quality_rows)
-
+            keyboard = build_quality_keyboard(quality_choices)
             caption_text = f"🎬 <b>{title}</b>\n\n👇 <b>Select your preferred quality:</b>"
 
             if thumbnail_url:
@@ -409,10 +430,9 @@ async def handle_user_inputs(client, message):
 
         except Exception as e:
             logging.exception("Info extraction error: %s", e)
-            reason = 'Metadata lookup timed out after 45 seconds.' if isinstance(e, asyncio.TimeoutError) else str(e)
+            reason = 'Metadata lookup timed out.' if isinstance(e, asyncio.TimeoutError) else str(e)
             await status_msg.edit_text(
-                f"❌ Could not fetch video info.\n\nReason: <code>{html.escape(reason[:500])}</code>\n\n"
-                'If this is a DRM-protected Sun NXT title, quality buttons cannot be generated from it.' ,
+                f"❌ Could not fetch video info.\n\nReason: <code>{html.escape(reason[:500])}</code>",
                 parse_mode="html"
             )
     else:
@@ -422,7 +442,7 @@ async def handle_user_inputs(client, message):
 async def select_audio_languages(client, callback_query: CallbackQuery):
     data_parts = callback_query.data.split("|")
     quality = data_parts[2]
-    
+
     user_id = callback_query.from_user.id
     user_data = USER_URLS.get(user_id)
 
@@ -441,7 +461,7 @@ async def select_audio_languages(client, callback_query: CallbackQuery):
         audio_buttons.append([
             InlineKeyboardButton(f"🔊 {lang_name} Audio", callback_data=f"dl_final|{quality}|{lang}")
         ])
-    
+
     audio_buttons.append([
         InlineKeyboardButton("🌐 Download All Audio (Multi-Audio)", callback_data=f"dl_final|{quality}|all")
     ])
@@ -459,7 +479,7 @@ async def download_final_media(client, callback_query: CallbackQuery):
     data_parts = callback_query.data.split("|")
     quality = data_parts[1]
     selected_audio = data_parts[2]
-    
+
     user_id = callback_query.from_user.id
     user_data = USER_URLS.get(user_id)
 
@@ -518,7 +538,7 @@ async def download_final_media(client, callback_query: CallbackQuery):
         if filename and os.path.exists(filename):
             dir_name, orig_filename = os.path.split(filename)
             _, ext = os.path.splitext(orig_filename)
-            
+
             if custom_name:
                 safe_custom_name = custom_name.replace("/", "_").replace("\\", "_")
                 new_filename = os.path.join(dir_name, f"{safe_custom_name}_{selected_audio.upper()}{ext}")
@@ -533,7 +553,7 @@ async def download_final_media(client, callback_query: CallbackQuery):
             thumb_path = USER_THUMBNAILS[user_id]
         elif f"yt_{user_id}" in USER_THUMBNAILS and os.path.exists(USER_THUMBNAILS[f"yt_{user_id}"]):
             thumb_path = USER_THUMBNAILS[f"yt_{user_id}"]
-            
+
         if not thumb_path or not os.path.exists(thumb_path):
             thumb_path = generate_thumbnail(filename, user_id)
 
@@ -550,7 +570,7 @@ async def download_final_media(client, callback_query: CallbackQuery):
         )
 
         await status_msg.delete()
-        
+
     except Exception as e:
         if user_id in CANCEL_REQUESTS or "cancelled" in str(e).lower():
             await status_msg.edit_text("❌ Task Cancelled successfully!")
