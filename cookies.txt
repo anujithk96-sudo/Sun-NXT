@@ -1,3 +1,0 @@
-# Netscape HTTP Cookie File
-# Add your own freshly exported Sun NXT cookies here if required.
-# Do not share this file: it may contain login session credentials.
