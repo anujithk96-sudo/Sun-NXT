@@ -1,0 +1,22 @@
+# Netscape HTTP Cookie File
+# https://curl.haxx.se/rfc/cookie_spec.html
+# This is a generated file! Do not edit.
+
+.sunnxt.com	TRUE	/	TRUE	1829053998	_twpid	tw.1795357975282.497942726943215
+.sunnxt.com	TRUE	/	FALSE	1796567576	sessionid	b5z0ryiailq7gxd5norgiu3mfkpyfsnu
+.sunnxt.com	TRUE	/	FALSE	1803133976	_gcl_au	1.1.1013382757.1795357976
+.sunnxt.com	TRUE	/	FALSE	1803133977	_gcl_gs	2.1.k1$i1795357973$u189562025
+.sunnxt.com	TRUE	/	FALSE	1829918130	_ga	GA1.1.2126352613.1795357976
+www.sunnxt.com	FALSE	/	TRUE	1826893978	clientId	46da553cc82f40de
+.sunnxt.com	TRUE	/	FALSE	1803134146	_fbp	fb.1.1795357977709.579397241388016524
+.sunnxt.com	TRUE	/	FALSE	1826894132	WZRK_G:WW6-54K-855Z	bd9fdfbef3444155b9bb428adbde0130
+.sunnxt.com	TRUE	/	FALSE	1829918132	afUserId	e816e9c9-1b3d-4e8a-a2eb-7d0532cf35c2-p
+.sunnxt.com	TRUE	/	FALSE	1795962778	AF_SYNC	1795357978310
+www.sunnxt.com	FALSE	/	FALSE	0	selected_language	tamil,telugu,kannada,malayalam,marathi,hindi,bengali,english
+www.sunnxt.com	FALSE	/	FALSE	0	shorts_selected_language	telugu,tamil,malayalam
+www.sunnxt.com	FALSE	/	FALSE	1826893998	language_selected	true
+.sunnxt.com	TRUE	/	FALSE	1803134000	_gcl_aw	GCL.1795358000.EAIaIQobChMIgaO70eWbmAMVH5lmAh0G8ASREAAYASAAEgLlo_D_BwE
+.sunnxt.com	TRUE	/	FALSE	1826894128	WZRK_X:WW6-54K-855Z	%7B%22cache%22%3A%5B%5B22228268%2C%22bd9fdfbef3444155b9bb428adbde0130%22%5D%5D%7D
+.sunnxt.com	TRUE	/	FALSE	1829918148	_ga_M4Z38WW7QV	GS2.1.s1795357976$o1$g1$t1795358147$j42$l0$h180879009
+.sunnxt.com	TRUE	/	FALSE	1795359369	WZRK_S:WW6-54K-855Z	%7B%22p%22%3A4%2C%22s%22%3A1795357977%2C%22t%22%3A1795358169%7D
+.sunnxt.com	TRUE	/	TRUE	1829054176	_twsid	1795357975283-932882397.1.1795358175545
