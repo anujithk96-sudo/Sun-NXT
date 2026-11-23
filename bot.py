@@ -184,6 +184,45 @@ def build_quality_keyboard(quality_choices):
     return InlineKeyboardMarkup(quality_rows)
 
 
+
+def extract_media_info(url, ydl_opts, download=False):
+    """
+    Extract media using yt-dlp's normal site extractor first.
+    For Sun NXT only, retry with yt-dlp's generic webpage extractor.
+    This can find openly exposed, non-DRM media URLs; it does not bypass
+    login, DRM, encryption, or other access controls.
+    """
+    is_sunnxt = "sunnxt.com" in url.lower()
+    attempts = [dict(ydl_opts)]
+
+    if is_sunnxt:
+        generic_opts = dict(ydl_opts)
+        generic_opts["force_generic_extractor"] = True
+        attempts.append(generic_opts)
+
+    last_error = None
+    for index, options in enumerate(attempts):
+        try:
+            with yt_dlp.YoutubeDL(options) as ydl:
+                info = ydl.extract_info(url, download=download)
+
+            # Prefer an extraction that actually exposes downloadable formats.
+            if not is_sunnxt or download or (info and info.get("formats")):
+                return info
+        except Exception as exc:
+            last_error = exc
+            logger.warning(
+                "yt-dlp extraction attempt %s failed for %s: %s",
+                index + 1, "Sun NXT" if is_sunnxt else "URL", exc
+            )
+
+    if last_error:
+        raise last_error
+    raise yt_dlp.utils.DownloadError(
+        "Sun NXT page did not expose any downloadable non-DRM media formats."
+    )
+
+
 app = Client(
     "jiohotstar_bot",
     api_id=int(API_ID) if API_ID and API_ID.isdigit() else 0,
@@ -442,8 +481,7 @@ async def handle_user_inputs(client, message):
                 ydl_opts["cookiefile"] = cookie_file_path
 
             def extract_info_fast():
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    return ydl.extract_info(url, download=False)
+                return extract_media_info(url, ydl_opts, download=False)
 
             info_task = asyncio.create_task(asyncio.to_thread(extract_info_fast))
             done, _ = await asyncio.wait({info_task}, timeout=5)
@@ -641,8 +679,20 @@ async def download_final_media(client, callback_query: CallbackQuery):
             )
         ],
     }
-    if os.path.exists("cookies.txt"):
-        ydl_opts["cookiefile"] = "cookies.txt"
+    configured_cookie_file = os.getenv("COOKIE_FILE", "cookies.txt")
+    if os.path.isfile(configured_cookie_file):
+        ydl_opts["cookiefile"] = configured_cookie_file
+
+    ydl_opts.update({
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "retries": 3,
+        "fragment_retries": 3,
+        "extractor_retries": 2,
+        "socket_timeout": 30,
+        "continuedl": True,
+    })
 
     thumb_path = None
     filename = None
@@ -651,10 +701,11 @@ async def download_final_media(client, callback_query: CallbackQuery):
         os.makedirs("downloads", exist_ok=True)
 
         def run_download():
+            if user_id in CANCEL_REQUESTS:
+                raise Exception("Task cancelled by user.")
+
+            info = extract_media_info(url, ydl_opts, download=True)
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                if user_id in CANCEL_REQUESTS:
-                    raise Exception("Task cancelled by user.")
-                info = ydl.extract_info(url, download=True)
                 requested = info.get("requested_downloads") or []
                 if requested:
                     for item in requested:
