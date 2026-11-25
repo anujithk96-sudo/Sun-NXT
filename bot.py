@@ -507,14 +507,17 @@ async def handle_user_inputs(client, message):
             for f in formats:
                 if f.get("has_drm") or not f.get("format_id"):
                     continue
-                if f.get("height"):
-                    heights_set.add(int(f.get("height")))
-                elif f.get("resolution") and "x" in str(f.get("resolution")):
-                    try:
-                        h_val = int(str(f.get("resolution")).split("x")[-1])
-                        heights_set.add(h_val)
-                    except ValueError:
-                        pass
+                # Do not show audio-only formats as video quality buttons.
+                if f.get("vcodec") == "none":
+                    continue
+                try:
+                    height = f.get("height")
+                    if height:
+                        heights_set.add(int(height))
+                    elif f.get("resolution") and "x" in str(f.get("resolution")):
+                        heights_set.add(int(str(f.get("resolution")).split("x")[-1]))
+                except (TypeError, ValueError):
+                    continue
 
             if info.get("height"):
                 try:
@@ -604,36 +607,23 @@ async def select_audio_languages(client, callback_query: CallbackQuery):
         )
         return
 
-    detected_langs = ["mal", "tam", "hin", "eng", "tel", "kan"]
-    audio_buttons = []
-    for lang in detected_langs:
-        lang_name = lang.upper()
-        audio_buttons.append([
-            InlineKeyboardButton(
-                f"🔊 {lang_name} Audio", callback_data=f"dl_final|{quality}|{lang}"
-            )
-        ])
-    audio_buttons.append([
-        InlineKeyboardButton(
-            "🌐 Download All Audio (Multi-Audio)",
-            callback_data=f"dl_final|{quality}|all",
-        )
-    ])
-    audio_buttons.append([
-        InlineKeyboardButton("🔙 Back to Quality", callback_data="back_to_quality")
-    ])
-
-    await callback_query.message.edit_reply_markup(
-        reply_markup=InlineKeyboardMarkup(audio_buttons)
-    )
-    await callback_query.answer("Select audio language(s):")
+    # Start immediately after the user selects a quality. Language buttons were
+    # previously guessed rather than read from the actual stream metadata.
+    await callback_query.answer(f"Starting {quality}p download…")
+    await download_final_media(client, callback_query, quality_override=quality)
 
 
 @app.on_callback_query(filters.regex(r"^dl_final\|"))
-async def download_final_media(client, callback_query: CallbackQuery):
-    data_parts = callback_query.data.split("|")
-    quality = data_parts[1]
-    selected_audio = data_parts[2]
+async def download_final_media(
+    client, callback_query: CallbackQuery, quality_override=None
+):
+    if quality_override is None:
+        data_parts = callback_query.data.split("|")
+        quality = data_parts[1]
+        selected_audio = data_parts[2]
+    else:
+        quality = str(quality_override)
+        selected_audio = "all"
 
     user_id = callback_query.from_user.id
     user_data = USER_URLS.get(user_id)
@@ -660,19 +650,16 @@ async def download_final_media(client, callback_query: CallbackQuery):
         reply_markup=cancel_keyboard,
     )
 
-    if selected_audio == "all":
-        format_str = (
-            f"bestvideo[height<={quality}]+bestaudio/best[height<={quality}]/best"
-        )
-    else:
-        format_str = (
-            f"bestvideo[height<={quality}]+bestaudio[language={selected_audio}]"
-            f"/best[height<={quality}]/best"
-        )
+    # Prefer separate best video + audio, then a muxed format. The final
+    # unrestricted fallback is useful when a site labels resolution unusually.
+    format_str = (
+        f"bestvideo[height<={quality}]+bestaudio/"
+        f"best[height<={quality}]/bestvideo+bestaudio/best"
+    )
 
     ydl_opts = {
         "format": format_str,
-        "outtmpl": "downloads/%(title)s.%(ext)s",
+        "outtmpl": f"downloads/%(title).180B_{user_id}_{uuid.uuid4().hex[:8]}.%(ext)s",
         "progress_hooks": [
             get_progress_hook(
                 client, status_msg, user_id, f"Downloading {quality}p Video"
@@ -687,11 +674,14 @@ async def download_final_media(client, callback_query: CallbackQuery):
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
-        "retries": 3,
-        "fragment_retries": 3,
-        "extractor_retries": 2,
-        "socket_timeout": 30,
+        "retries": 10,
+        "fragment_retries": 10,
+        "file_access_retries": 5,
+        "extractor_retries": 5,
+        "socket_timeout": 60,
         "continuedl": True,
+        "concurrent_fragment_downloads": 4,
+        "merge_output_format": "mp4",
     })
 
     thumb_path = None
@@ -770,7 +760,14 @@ async def download_final_media(client, callback_query: CallbackQuery):
         if user_id in CANCEL_REQUESTS or "cancelled" in str(e).lower():
             await status_msg.edit_text("❌ Task Cancelled successfully!")
         else:
-            await status_msg.edit_text(f"❌ Download failed: {str(e)}")
+            error_text = str(e) or e.__class__.__name__
+            await status_msg.edit_text(
+                "❌ Download failed.\n\n"
+                f"Reason: {html.escape(error_text[:900])}\n\n"
+                "Note: DRM-protected streams or pages without exposed downloadable "
+                "formats cannot be downloaded by this bot.",
+                parse_mode=ParseMode.HTML,
+            )
     finally:
         if filename and os.path.exists(filename):
             try:
