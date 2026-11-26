@@ -6,6 +6,7 @@ import re
 import time
 import uuid
 from pathlib import Path
+from urllib.parse import urlparse
 
 import yt_dlp
 from dotenv import load_dotenv
@@ -46,6 +47,34 @@ DOWNLOAD_DIR.mkdir(exist_ok=True)
 
 TARGET_QUALITIES = [1080, 720, 476, 360, 144, 140, 120]
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m|\[\d+(?:;\d+)*m")
+
+# Example Sun NXT URLs for reference and domain recognition
+SUNNXT_EXAMPLE_URLS = [
+    "https://www.sunnxt.com/suntv-malayalam-serial-kanyadaanam-nov-01-2026-episodeno1835-Nov01-2026/detail/122855/281312",
+    "https://www.sunnxt.com",
+    "sunnxt.com",
+]
+
+
+def is_sunnxt_url(url: str) -> bool:
+    normalized = url.strip().lower()
+    if normalized == "sunnxt.com" or normalized.startswith(("https://sunnxt.com", "http://sunnxt.com", "https://www.sunnxt.com", "http://www.sunnxt.com")):
+        return True
+    parsed = urlparse(normalized if "://" in normalized else f"https://{normalized}")
+    host = (parsed.netloc or "").lower()
+    return host == "sunnxt.com" or host.endswith(".sunnxt.com")
+
+
+def sunnxt_support_requirements(url: str) -> str:
+    """Explain what is needed for Sun NXT links to be supported/accessible."""
+    has_cookies = os.path.isfile(COOKIE_FILE)
+    cookie_status = f"Found ({COOKIE_FILE})" if has_cookies else f"Missing ({COOKIE_FILE})"
+    return (
+        f"Sun NXT Link Check ({url}):\n"
+        f"- Extractor Support: yt-dlp does not have a built-in extractor for Sun NXT web URLs, so 'Unsupported URL' can occur.\n"
+        f"- Auth / Session Cookies: {cookie_status}. Sun NXT typically requires valid account login/session cookies.\n"
+        f"- Stream & DRM Limits: Many OTT streams require authorized stream tokens and may use DRM protection, which this bot does not bypass."
+    )
 
 
 def clean_error_text(err, limit: int = 700) -> str:
@@ -109,7 +138,7 @@ def inspect_media(info):
     return heights, has_audio
 
 
-def quality_keyboard(has_audio: bool):
+def quality_keyboard(has_audio: bool = True):
     rows = []
     for height in TARGET_QUALITIES:
         rows.append([
@@ -166,6 +195,31 @@ def progress_hook(user_id, status_message, client):
     return hook
 
 
+async def show_quality_buttons(
+    status_msg,
+    user_id: int,
+    url: str,
+    title: str,
+    has_audio: bool = True,
+    note: str = "",
+):
+    PENDING[user_id] = {
+        "url": url,
+        "title": title,
+        "has_audio": has_audio,
+    }
+    safe_title = html.escape(title[:300])
+    extra_note = f"\n⚠️ <i>{html.escape(note[:450])}</i>" if note else ""
+
+    await status_msg.edit_text(
+        f"🎬 <b>{safe_title}</b>{extra_note}\n\n"
+        "👇 <b>Select a quality or Audio MP3 first. "
+        "Downloading will start only after you click a button.</b>",
+        reply_markup=quality_keyboard(has_audio),
+        parse_mode=ParseMode.HTML,
+    )
+
+
 async def fetch_link(message, url):
     user_id = message.from_user.id
 
@@ -184,8 +238,13 @@ async def fetch_link(message, url):
     FETCHING.add(user_id)
 
     status = await message.reply_text(
-        "⏳ Checking video info and available qualities... Please wait up to 2 minutes."
+        "⏳ Preparing quality options..."
     )
+
+    sunnxt_note = ""
+    if is_sunnxt_url(url):
+        sunnxt_note = sunnxt_support_requirements(url)
+        log.info(sunnxt_note)
 
     try:
         opts = ydl_base_options()
@@ -200,58 +259,41 @@ async def fetch_link(message, url):
 
         info = await asyncio.wait_for(
             asyncio.to_thread(extract),
-            timeout=120,
+            timeout=15,
         )
 
-        if not info:
-            raise RuntimeError("No video information returned.")
-
-        if info.get("has_drm"):
+        if info and info.get("has_drm"):
             await status.edit_text(
                 "🔒 This media is DRM-protected, "
                 "so download quality buttons cannot be provided."
             )
             return
 
-        heights, has_audio = inspect_media(info)
-
-        if not heights and not has_audio:
-            await status.edit_text(
-                "❌ No downloadable non-DRM media formats found.\n\n"
-                "The site may be unsupported, require login/access, "
-                "or be DRM-protected."
-            )
-            return
-
-        PENDING[user_id] = {
-            "url": url,
-            "title": str(info.get("title") or "OTT Video"),
-            "heights": sorted(heights),
-            "has_audio": has_audio,
-        }
-
-        title = html.escape(PENDING[user_id]["title"][:300])
-
-        await status.edit_text(
-            f"🎬 <b>{title}</b>\n\n"
-            "👇 <b>Select a quality or Audio MP3 first. "
-            "Downloading will start only after you choose an option.</b>",
-            reply_markup=quality_keyboard(has_audio),
-            parse_mode=ParseMode.HTML,
-        )
-
-    except asyncio.TimeoutError:
-        await status.edit_text(
-            "⌛ Timed out after 120 seconds while fetching video info. Please try again later."
+        title = str((info or {}).get("title") or ("Sun NXT Link" if is_sunnxt_url(url) else "Video Link"))
+        await show_quality_buttons(
+            status,
+            user_id,
+            url,
+            title=title,
+            has_audio=True,
+            note=sunnxt_note,
         )
 
     except Exception as exc:
-        log.exception("Metadata extraction failed")
-        reason = clean_error_text(exc, 700)
-
-        await status.edit_text(
-            f"❌ Could not fetch video info.\n\n<code>{reason}</code>",
-            parse_mode=ParseMode.HTML,
+        err_clean = ANSI_ESCAPE_RE.sub("", str(exc)).strip()
+        log.warning("Metadata pre-check note for %s: %s", url, err_clean)
+        combined_note = (
+            f"{sunnxt_note}\n{err_clean}".strip()
+            if sunnxt_note
+            else err_clean
+        )
+        await show_quality_buttons(
+            status,
+            user_id,
+            url,
+            title="Sun NXT Link" if is_sunnxt_url(url) else "Video Link",
+            has_audio=True,
+            note=combined_note,
         )
 
     finally:
@@ -260,10 +302,12 @@ async def fetch_link(message, url):
 
 @app.on_message(filters.private & filters.command("start"))
 async def start_handler(client, message):
+    examples_text = "\n".join(f"• {u}" for u in SUNNXT_EXAMPLE_URLS)
     await message.reply_text(
         "🎬 OTT Video Bot\n\n"
         "Send a video link to see quality and Audio MP3 buttons first.\n"
         "Downloading starts only after you select an option.\n\n"
+        f"Example Sun NXT URLs:\n{examples_text}\n\n"
         "/help - Help\n"
         "/status - Current status\n"
         "/cancel - Cancel download"
@@ -272,12 +316,14 @@ async def start_handler(client, message):
 
 @app.on_message(filters.private & filters.command("help"))
 async def help_handler(client, message):
+    examples_text = "\n".join(f"• {u}" for u in SUNNXT_EXAMPLE_URLS)
     await message.reply_text(
         "Send a link directly or use /rip URL.\n\n"
-        "1. The bot checks video metadata.\n"
-        "2. Quality buttons and Audio MP3 button are shown.\n"
-        "3. Downloading starts only after you click a button.\n\n"
-        "DRM protection or login/access restrictions are not bypassed."
+        "1. Quality buttons and Audio MP3 button are shown first.\n"
+        "2. Downloading starts only after you click a button.\n\n"
+        f"Examples:\n{examples_text}\n\n"
+        "Note: Sun NXT web URLs require yt-dlp support, valid session/cookies, "
+        "and non-DRM streams; DRM or login/access restrictions are not bypassed."
     )
 
 
@@ -291,7 +337,7 @@ async def status_handler(client, message):
         )
     elif uid in FETCHING:
         await message.reply_text(
-            "⏳ Checking video information."
+            "⏳ Preparing quality options."
         )
     else:
         await message.reply_text(
@@ -321,18 +367,22 @@ async def rip_handler(client, message):
     url = next(
         (
             x for x in args
-            if x.startswith(("https://", "http://"))
+            if x.startswith(("https://", "http://")) or "sunnxt.com" in x.lower()
         ),
         None,
     )
 
     if not url:
         await message.reply_text(
-            "Usage: /rip https://example.com/video-link"
+            "Usage: /rip https://www.sunnxt.com/suntv-malayalam-serial-kanyadaanam-nov-01-2026-episodeno1835-Nov01-2026/detail/122855/281312"
         )
         return
 
-    await fetch_link(message, url.rstrip(".,);]>"))
+    cleaned_url = url.rstrip(".,);]>")
+    if not cleaned_url.startswith(("https://", "http://")):
+        cleaned_url = f"https://{cleaned_url}"
+
+    await fetch_link(message, cleaned_url)
 
 
 @app.on_message(
@@ -341,21 +391,21 @@ async def rip_handler(client, message):
     & ~filters.command(["start", "help", "status", "cancel", "rip"])
 )
 async def link_handler(client, message):
-    match = re.search(
-        r"https?://[^\s]+",
-        message.text or "",
-    )
+    text = message.text or ""
+    match = re.search(r"https?://[^\s]+", text)
 
-    if not match:
+    if match:
+        url = match.group(0).rstrip(".,);]>")
+    elif "sunnxt.com" in text.lower():
+        sun_match = re.search(r"(?:www\.)?sunnxt\.com[^\s]*", text, flags=re.IGNORECASE)
+        url = f"https://{sun_match.group(0).rstrip('.,);]>')}" if sun_match else "https://www.sunnxt.com"
+    else:
         await message.reply_text(
             "❌ Please send a valid video link."
         )
         return
 
-    await fetch_link(
-        message,
-        match.group(0).rstrip(".,);]>"),
-    )
+    await fetch_link(message, url)
 
 
 def find_downloaded_file(ydl, info, uid: int, expected_exts: tuple):
@@ -413,13 +463,6 @@ async def quality_callback(client, callback: CallbackQuery):
     choice = callback.data.split(":", 1)[1]
     is_audio = choice == "mp3"
 
-    if is_audio and not pending.get("has_audio"):
-        await callback.answer(
-            "Audio is not available for this media.",
-            show_alert=True,
-        )
-        return
-
     label = "Audio MP3" if is_audio else f"{int(choice)}p"
     await callback.answer(
         f"Selected {label}. Starting download..."
@@ -429,7 +472,7 @@ async def quality_callback(client, callback: CallbackQuery):
     CANCELLED.discard(uid)
 
     status = await callback.message.reply_text(
-        f"⏳ Preparing {label} download..."
+        f"⏳ Starting {label} download..."
     )
 
     filename = None
@@ -527,9 +570,13 @@ async def quality_callback(client, callback: CallbackQuery):
         if uid in CANCELLED or "cancel" in str(exc).lower():
             text = "❌ Download cancelled."
         else:
+            extra_info = ""
+            if is_sunnxt_url(pending["url"]):
+                extra_info = "\n\n" + html.escape(sunnxt_support_requirements(pending["url"]))
             text = (
                 "❌ Download failed.\n\n"
                 + f"<code>{clean_error_text(exc, 800)}</code>"
+                + extra_info
             )
 
         try:
