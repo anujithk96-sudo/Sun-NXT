@@ -171,20 +171,20 @@ async def fetch_link(message, url):
 
     if user_id in FETCHING:
         await message.reply_text(
-            "⏳ നിങ്ങളുടെ മുമ്പത്തെ ലിങ്ക് പരിശോധിച്ചുകൊണ്ടിരിക്കുന്നു. കാത്തിരിക്കുക."
+            "⏳ Your previous link is still being checked. Please wait."
         )
         return
 
     if user_id in DOWNLOADING:
         await message.reply_text(
-            "⏳ മുമ്പത്തെ ഡൗൺലോഡ് തീരുന്നതുവരെ കാത്തിരിക്കുക."
+            "⏳ Please wait until the current download finishes."
         )
         return
 
     FETCHING.add(user_id)
 
     status = await message.reply_text(
-        "⏳ വീഡിയോ വിവരങ്ങൾ പരിശോധിക്കുന്നു... പരമാവധി 2 മിനിറ്റ് കാത്തിരിക്കുക."
+        "⏳ Checking video info and available qualities... Please wait up to 2 minutes."
     )
 
     try:
@@ -204,12 +204,12 @@ async def fetch_link(message, url):
         )
 
         if not info:
-            raise RuntimeError("വീഡിയോ വിവരങ്ങൾ ലഭിച്ചില്ല.")
+            raise RuntimeError("No video information returned.")
 
         if info.get("has_drm"):
             await status.edit_text(
-                "🔒 ഈ മീഡിയ DRM സംരക്ഷണമുള്ളതാണ്. "
-                "അതുകൊണ്ട് ഡൗൺലോഡ് ക്വാളിറ്റി ബട്ടണുകൾ നൽകാനാവില്ല."
+                "🔒 This media is DRM-protected, "
+                "so download quality buttons cannot be provided."
             )
             return
 
@@ -217,9 +217,9 @@ async def fetch_link(message, url):
 
         if not heights and not has_audio:
             await status.edit_text(
-                "❌ ഡൗൺലോഡ് ചെയ്യാവുന്ന non-DRM മീഡിയ ഫോർമാറ്റുകൾ ലഭിച്ചില്ല.\n\n"
-                "സൈറ്റ് പിന്തുണയില്ലാത്തതോ, login ആവശ്യമുള്ളതോ, "
-                "DRM സംരക്ഷണമുള്ളതോ ആകാം."
+                "❌ No downloadable non-DRM media formats found.\n\n"
+                "The site may be unsupported, require login/access, "
+                "or be DRM-protected."
             )
             return
 
@@ -234,15 +234,15 @@ async def fetch_link(message, url):
 
         await status.edit_text(
             f"🎬 <b>{title}</b>\n\n"
-            "👇 <b>ആദ്യം നിങ്ങൾക്ക് വേണ്ട ക്വാളിറ്റി അല്ലെങ്കിൽ Audio MP3 തിരഞ്ഞെടുക്കുക. "
-            "അതിനുശേഷം മാത്രമേ ഡൗൺലോഡ് ആരംഭിക്കൂ.</b>",
+            "👇 <b>Select a quality or Audio MP3 first. "
+            "Downloading will start only after you choose an option.</b>",
             reply_markup=quality_keyboard(has_audio),
             parse_mode=ParseMode.HTML,
         )
 
     except asyncio.TimeoutError:
         await status.edit_text(
-            "⌛ 120 സെക്കൻഡിനുള്ളിൽ വീഡിയോ വിവരങ്ങൾ ലഭിച്ചില്ല. പിന്നീട് വീണ്ടും ശ്രമിക്കുക."
+            "⌛ Timed out after 120 seconds while fetching video info. Please try again later."
         )
 
     except Exception as exc:
@@ -262,22 +262,22 @@ async def fetch_link(message, url):
 async def start_handler(client, message):
     await message.reply_text(
         "🎬 OTT Video Bot\n\n"
-        "വീഡിയോ ലിങ്ക് അയക്കുക. ആദ്യം Quality / Audio MP3 ബട്ടണുകൾ കാണിക്കും.\n"
-        "നിങ്ങൾ ഒരു ബട്ടൺ തിരഞ്ഞെടുക്കുമ്പോൾ മാത്രമേ ഡൗൺലോഡ് തുടങ്ങൂ.\n\n"
-        "/help - സഹായം\n"
-        "/status - നിലവിലെ ഡൗൺലോഡ്\n"
-        "/cancel - ഡൗൺലോഡ് റദ്ദാക്കുക"
+        "Send a video link to see quality and Audio MP3 buttons first.\n"
+        "Downloading starts only after you select an option.\n\n"
+        "/help - Help\n"
+        "/status - Current status\n"
+        "/cancel - Cancel download"
     )
 
 
 @app.on_message(filters.private & filters.command("help"))
 async def help_handler(client, message):
     await message.reply_text(
-        "ലിങ്ക് നേരിട്ട് അയക്കുക അല്ലെങ്കിൽ /rip URL ഉപയോഗിക്കുക.\n\n"
-        "1. ബോട്ട് വീഡിയോ വിവരങ്ങൾ പരിശോധിക്കും.\n"
-        "2. ക്വാളിറ്റി ബട്ടണുകളും Audio MP3 ബട്ടണും കാണിക്കും.\n"
-        "3. ബട്ടൺ അമർത്തിയാൽ മാത്രമേ ഡൗൺലോഡ് തുടങ്ങൂ.\n\n"
-        "DRM സംരക്ഷണമോ login/access നിയന്ത്രണമോ മറികടക്കില്ല."
+        "Send a link directly or use /rip URL.\n\n"
+        "1. The bot checks video metadata.\n"
+        "2. Quality buttons and Audio MP3 button are shown.\n"
+        "3. Downloading starts only after you click a button.\n\n"
+        "DRM protection or login/access restrictions are not bypassed."
     )
 
 
@@ -287,15 +287,15 @@ async def status_handler(client, message):
 
     if uid in DOWNLOADING:
         await message.reply_text(
-            "⬇️ നിങ്ങളുടെ ഡൗൺലോഡ് ഇപ്പോൾ പ്രവർത്തിക്കുന്നു."
+            "⬇️ Your download is currently in progress."
         )
     elif uid in FETCHING:
         await message.reply_text(
-            "⏳ വീഡിയോ വിവരങ്ങൾ പരിശോധിക്കുന്നു."
+            "⏳ Checking video information."
         )
     else:
         await message.reply_text(
-            "📭 ഇപ്പോൾ സജീവമായ ഡൗൺലോഡ് ഇല്ല."
+            "📭 No active download right now."
         )
 
 
@@ -306,11 +306,11 @@ async def cancel_handler(client, message):
     if uid in DOWNLOADING:
         CANCELLED.add(uid)
         await message.reply_text(
-            "🛑 ഡൗൺലോഡ് റദ്ദാക്കാനുള്ള അഭ്യർത്ഥന നൽകി."
+            "🛑 Cancellation requested for your current download."
         )
     else:
         await message.reply_text(
-            "ഇപ്പോൾ റദ്ദാക്കാനുള്ള ഡൗൺലോഡ് ഇല്ല."
+            "There is no active download to cancel."
         )
 
 
@@ -328,7 +328,7 @@ async def rip_handler(client, message):
 
     if not url:
         await message.reply_text(
-            "ഉപയോഗം: /rip https://example.com/video-link"
+            "Usage: /rip https://example.com/video-link"
         )
         return
 
@@ -348,7 +348,7 @@ async def link_handler(client, message):
 
     if not match:
         await message.reply_text(
-            "❌ ദയവായി സാധുവായ വീഡിയോ ലിങ്ക് അയക്കുക."
+            "❌ Please send a valid video link."
         )
         return
 
@@ -398,14 +398,14 @@ async def quality_callback(client, callback: CallbackQuery):
 
     if not pending:
         await callback.answer(
-            "ലിങ്ക് കാലഹരണപ്പെട്ടു. വീണ്ടും ലിങ്ക് അയക്കുക.",
+            "Link expired. Please send the link again.",
             show_alert=True,
         )
         return
 
     if uid in DOWNLOADING:
         await callback.answer(
-            "ഒരു ഡൗൺലോഡ് ഇതിനകം നടക്കുന്നു.",
+            "A download is already in progress.",
             show_alert=True,
         )
         return
@@ -415,21 +415,21 @@ async def quality_callback(client, callback: CallbackQuery):
 
     if is_audio and not pending.get("has_audio"):
         await callback.answer(
-            "ഈ വീഡിയോയിൽ ഓഡിയോ ലഭ്യമല്ല.",
+            "Audio is not available for this media.",
             show_alert=True,
         )
         return
 
     label = "Audio MP3" if is_audio else f"{int(choice)}p"
     await callback.answer(
-        f"{label} തിരഞ്ഞെടുത്തു. ഡൗൺലോഡ് ആരംഭിക്കുന്നു..."
+        f"Selected {label}. Starting download..."
     )
 
     DOWNLOADING.add(uid)
     CANCELLED.discard(uid)
 
     status = await callback.message.reply_text(
-        f"⏳ {label} ഡൗൺലോഡ് തയ്യാറാക്കുന്നു..."
+        f"⏳ Preparing {label} download..."
     )
 
     filename = None
@@ -489,11 +489,11 @@ async def quality_callback(client, callback: CallbackQuery):
 
         if not filename or not os.path.isfile(filename):
             raise RuntimeError(
-                "ഡൗൺലോഡ് ഫയൽ കണ്ടെത്താനായില്ല."
+                "Downloaded file could not be found."
             )
 
         await status.edit_text(
-            f"📤 {label} Telegram-ലേക്ക് അപ്‌ലോഡ് ചെയ്യുന്നു..."
+            f"📤 Uploading {label} to Telegram..."
         )
 
         safe_title = html.escape(pending["title"][:200])
@@ -525,10 +525,10 @@ async def quality_callback(client, callback: CallbackQuery):
         log.exception("Download failed")
 
         if uid in CANCELLED or "cancel" in str(exc).lower():
-            text = "❌ ഡൗൺലോഡ് റദ്ദാക്കി."
+            text = "❌ Download cancelled."
         else:
             text = (
-                "❌ ഡൗൺലോഡ് പരാജയപ്പെട്ടു.\n\n"
+                "❌ Download failed.\n\n"
                 + f"<code>{clean_error_text(exc, 800)}</code>"
             )
 
