@@ -49,7 +49,7 @@ DOWNLOAD_DIR.mkdir(exist_ok=True)
 THUMB_DIR = Path("thumbnails")
 THUMB_DIR.mkdir(exist_ok=True)
 
-TARGET_QUALITIES = [1080, 720, 476, 360, 144, 140, 120]
+TARGET_QUALITIES = [1080, 720, 576, 480, 360, 240, 144]
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m|\[\d+(?:;\d+)*m")
 
 
