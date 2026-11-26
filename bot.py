@@ -1,4 +1,3 @@
-
 import asyncio
 import html
 import logging
@@ -12,7 +11,7 @@ import yt_dlp
 from dotenv import load_dotenv
 from pyrogram import Client, filters
 from pyrogram.enums import ParseMode
-from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
+from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
 load_dotenv()
 
@@ -41,10 +40,16 @@ PENDING = {}
 FETCHING = set()
 DOWNLOADING = set()
 CANCELLED = set()
-ACTIVE = {}
 
 DOWNLOAD_DIR = Path("downloads")
 DOWNLOAD_DIR.mkdir(exist_ok=True)
+
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m|\[\d+(?:;\d+)*m")
+
+
+def clean_error_text(err, limit: int = 700) -> str:
+    cleaned = ANSI_ESCAPE_RE.sub("", str(err)).strip()
+    return html.escape(cleaned[:limit])
 
 
 def ydl_base_options():
@@ -52,6 +57,7 @@ def ydl_base_options():
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
+        "nocolor": True,
         "socket_timeout": 30,
         "retries": 5,
         "extractor_retries": 3,
@@ -96,9 +102,13 @@ def get_formats(info):
             1 if fmt.get("acodec") != "none" else 0,
         )
         old_score = (
-            old.get("filesize") or old.get("filesize_approx") or 0,
-            1 if old.get("acodec") != "none" else 0,
-        ) if old else (-1, -1)
+            (
+                old.get("filesize") or old.get("filesize_approx") or 0,
+                1 if old.get("acodec") != "none" else 0,
+            )
+            if old
+            else (-1, -1)
+        )
 
         if old is None or score > old_score:
             found[height] = fmt
@@ -112,7 +122,7 @@ def quality_keyboard(qualities):
         rows.append([
             InlineKeyboardButton(
                 f"📹 {height}p",
-                callback_data=f"quality:{height}"
+                callback_data=f"quality:{height}",
             )
         ])
     return InlineKeyboardMarkup(rows)
@@ -134,9 +144,9 @@ def progress_hook(user_id, status_message, client):
 
         last_edit[0] = now
 
-        percent = str(data.get("_percent_str", "0%")).strip()
-        speed = str(data.get("_speed_str", "N/A")).strip()
-        eta = str(data.get("_eta_str", "N/A")).strip()
+        percent = ANSI_ESCAPE_RE.sub("", str(data.get("_percent_str", "0%"))).strip()
+        speed = ANSI_ESCAPE_RE.sub("", str(data.get("_speed_str", "N/A"))).strip()
+        eta = ANSI_ESCAPE_RE.sub("", str(data.get("_eta_str", "N/A"))).strip()
 
         text = (
             f"⬇️ Downloading...\n\n"
@@ -148,7 +158,7 @@ def progress_hook(user_id, status_message, client):
         try:
             asyncio.run_coroutine_threadsafe(
                 status_message.edit_text(text),
-                client.loop
+                client.loop,
             )
         except Exception:
             pass
@@ -190,7 +200,7 @@ async def fetch_link(message, url):
 
         info = await asyncio.wait_for(
             asyncio.to_thread(extract),
-            timeout=120
+            timeout=120,
         )
 
         if not info:
@@ -239,11 +249,11 @@ async def fetch_link(message, url):
 
     except Exception as exc:
         log.exception("Metadata extraction failed")
-        reason = html.escape(str(exc)[:700])
+        reason = clean_error_text(exc, 700)
 
         await status.edit_text(
             f"❌ Could not fetch video info.\n\n<code>{reason}</code>",
-            parse_mode=ParseMode.HTML
+            parse_mode=ParseMode.HTML,
         )
 
     finally:
@@ -315,7 +325,7 @@ async def rip_handler(client, message):
             x for x in args
             if x.startswith(("https://", "http://"))
         ),
-        None
+        None,
     )
 
     if not url:
@@ -335,7 +345,7 @@ async def rip_handler(client, message):
 async def link_handler(client, message):
     match = re.search(
         r"https?://[^\s]+",
-        message.text or ""
+        message.text or "",
     )
 
     if not match:
@@ -346,7 +356,7 @@ async def link_handler(client, message):
 
     await fetch_link(
         message,
-        match.group(0).rstrip(".,);]>")
+        match.group(0).rstrip(".,);]>"),
     )
 
 
@@ -358,14 +368,14 @@ async def quality_callback(client, callback: CallbackQuery):
     if not pending:
         await callback.answer(
             "ലിങ്ക് കാലഹരണപ്പെട്ടു. വീണ്ടും ലിങ്ക് അയക്കുക.",
-            show_alert=True
+            show_alert=True,
         )
         return
 
     if uid in DOWNLOADING:
         await callback.answer(
             "ഒരു ഡൗൺലോഡ് ഇതിനകം നടക്കുന്നു.",
-            show_alert=True
+            show_alert=True,
         )
         return
 
@@ -375,7 +385,7 @@ async def quality_callback(client, callback: CallbackQuery):
     if not format_id:
         await callback.answer(
             "ഈ ക്വാളിറ്റി ഇപ്പോൾ ലഭ്യമല്ല.",
-            show_alert=True
+            show_alert=True,
         )
         return
 
@@ -394,8 +404,8 @@ async def quality_callback(client, callback: CallbackQuery):
 
     try:
         output_template = str(
-            DOWNLOAD_DIR /
-            f"%(title).150B_{uid}_{uuid.uuid4().hex[:8]}.%(ext)s"
+            DOWNLOAD_DIR
+            / f"%(title).150B_{uid}_{uuid.uuid4().hex[:8]}.%(ext)s"
         )
 
         opts = ydl_base_options()
@@ -419,7 +429,7 @@ async def quality_callback(client, callback: CallbackQuery):
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(
                     pending["url"],
-                    download=True
+                    download=True,
                 )
 
                 candidates = []
@@ -447,7 +457,7 @@ async def quality_callback(client, callback: CallbackQuery):
                         ".mp4",
                         ".mkv",
                         ".webm",
-                        ".mov"
+                        ".mov",
                     ):
                         if os.path.isfile(stem + ext):
                             return stem + ext
@@ -455,7 +465,7 @@ async def quality_callback(client, callback: CallbackQuery):
                 matches = sorted(
                     DOWNLOAD_DIR.glob(f"*_{uid}_*"),
                     key=lambda p: p.stat().st_mtime,
-                    reverse=True
+                    reverse=True,
                 )
 
                 return str(matches[0]) if matches else None
@@ -494,18 +504,18 @@ async def quality_callback(client, callback: CallbackQuery):
         else:
             text = (
                 "❌ ഡൗൺലോഡ് പരാജയപ്പെട്ടു.\n\n"
-                + html.escape(str(exc)[:800])
+                + f"<code>{clean_error_text(exc, 800)}</code>"
             )
 
         try:
             await status.edit_text(
                 text,
-                parse_mode=ParseMode.HTML
+                parse_mode=ParseMode.HTML,
             )
         except Exception:
             await callback.message.reply_text(
                 text,
-                parse_mode=ParseMode.HTML
+                parse_mode=ParseMode.HTML,
             )
 
     finally:
