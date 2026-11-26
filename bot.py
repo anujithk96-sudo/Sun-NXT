@@ -1,3 +1,4 @@
+
 import asyncio
 import html
 import logging
@@ -6,13 +7,12 @@ import re
 import time
 import uuid
 from pathlib import Path
-from urllib.parse import urlparse
 
 import yt_dlp
 from dotenv import load_dotenv
 from pyrogram import Client, filters
 from pyrogram.enums import ParseMode
-from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
+from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
 
 load_dotenv()
 
@@ -41,45 +41,10 @@ PENDING = {}
 FETCHING = set()
 DOWNLOADING = set()
 CANCELLED = set()
+ACTIVE = {}
 
 DOWNLOAD_DIR = Path("downloads")
 DOWNLOAD_DIR.mkdir(exist_ok=True)
-
-TARGET_QUALITIES = [1080, 720, 476, 360, 144, 140, 120]
-ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m|\[\d+(?:;\d+)*m")
-
-# Example Sun NXT URLs for reference and domain recognition
-SUNNXT_EXAMPLE_URLS = [
-    "https://www.sunnxt.com/suntv-malayalam-serial-kanyadaanam-nov-01-2026-episodeno1835-Nov01-2026/detail/122855/281312",
-    "https://www.sunnxt.com",
-    "sunnxt.com",
-]
-
-
-def is_sunnxt_url(url: str) -> bool:
-    normalized = url.strip().lower()
-    if normalized == "sunnxt.com" or normalized.startswith(("https://sunnxt.com", "http://sunnxt.com", "https://www.sunnxt.com", "http://www.sunnxt.com")):
-        return True
-    parsed = urlparse(normalized if "://" in normalized else f"https://{normalized}")
-    host = (parsed.netloc or "").lower()
-    return host == "sunnxt.com" or host.endswith(".sunnxt.com")
-
-
-def sunnxt_support_requirements(url: str) -> str:
-    """Explain what is needed for Sun NXT links to be supported/accessible."""
-    has_cookies = os.path.isfile(COOKIE_FILE)
-    cookie_status = f"Found ({COOKIE_FILE})" if has_cookies else f"Missing ({COOKIE_FILE})"
-    return (
-        f"Sun NXT Link Check ({url}):\n"
-        f"- Extractor Support: yt-dlp does not have a built-in extractor for Sun NXT web URLs, so 'Unsupported URL' can occur.\n"
-        f"- Auth / Session Cookies: {cookie_status}. Sun NXT typically requires valid account login/session cookies.\n"
-        f"- Stream & DRM Limits: Many OTT streams require authorized stream tokens and may use DRM protection, which this bot does not bypass."
-    )
-
-
-def clean_error_text(err, limit: int = 700) -> str:
-    cleaned = ANSI_ESCAPE_RE.sub("", str(err)).strip()
-    return html.escape(cleaned[:limit])
 
 
 def ydl_base_options():
@@ -87,7 +52,6 @@ def ydl_base_options():
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
-        "nocolor": True,
         "socket_timeout": 30,
         "retries": 5,
         "extractor_retries": 3,
@@ -99,27 +63,20 @@ def ydl_base_options():
     return opts
 
 
-def inspect_media(info):
-    """Inspect non-DRM video heights and check if audio stream exists."""
-    heights = set()
-    has_audio = False
-
+def get_formats(info):
+    """Return the best real, non-DRM video format for each available height."""
+    found = {}
     formats = info.get("formats") or []
+
     if not formats and info.get("format_id"):
         formats = [info]
 
     for fmt in formats:
         if fmt.get("has_drm"):
             continue
-        if not (fmt.get("url") or fmt.get("manifest_url") or fmt.get("protocol")):
+        if not fmt.get("format_id") or fmt.get("vcodec") == "none":
             continue
-
-        acodec = fmt.get("acodec")
-        if acodec and acodec != "none":
-            has_audio = True
-
-        vcodec = fmt.get("vcodec")
-        if not fmt.get("format_id") or vcodec == "none":
+        if not (fmt.get("url") or fmt.get("manifest_url") or fmt.get("protocol")):
             continue
 
         height = fmt.get("height")
@@ -130,28 +87,32 @@ def inspect_media(info):
 
         try:
             height = int(height)
-            if height > 0:
-                heights.add(height)
         except (TypeError, ValueError):
             continue
 
-    return heights, has_audio
+        old = found.get(height)
+        score = (
+            fmt.get("filesize") or fmt.get("filesize_approx") or 0,
+            1 if fmt.get("acodec") != "none" else 0,
+        )
+        old_score = (
+            old.get("filesize") or old.get("filesize_approx") or 0,
+            1 if old.get("acodec") != "none" else 0,
+        ) if old else (-1, -1)
+
+        if old is None or score > old_score:
+            found[height] = fmt
+
+    return found
 
 
-def quality_keyboard(has_audio: bool = True):
+def quality_keyboard(qualities):
     rows = []
-    for height in TARGET_QUALITIES:
+    for height in sorted(qualities, reverse=True):
         rows.append([
             InlineKeyboardButton(
                 f"📹 {height}p",
-                callback_data=f"quality:{height}",
-            )
-        ])
-    if has_audio:
-        rows.append([
-            InlineKeyboardButton(
-                "🎵 Audio MP3",
-                callback_data="quality:mp3",
+                callback_data=f"quality:{height}"
             )
         ])
     return InlineKeyboardMarkup(rows)
@@ -173,9 +134,9 @@ def progress_hook(user_id, status_message, client):
 
         last_edit[0] = now
 
-        percent = ANSI_ESCAPE_RE.sub("", str(data.get("_percent_str", "0%"))).strip()
-        speed = ANSI_ESCAPE_RE.sub("", str(data.get("_speed_str", "N/A"))).strip()
-        eta = ANSI_ESCAPE_RE.sub("", str(data.get("_eta_str", "N/A"))).strip()
+        percent = str(data.get("_percent_str", "0%")).strip()
+        speed = str(data.get("_speed_str", "N/A")).strip()
+        eta = str(data.get("_eta_str", "N/A")).strip()
 
         text = (
             f"⬇️ Downloading...\n\n"
@@ -187,7 +148,7 @@ def progress_hook(user_id, status_message, client):
         try:
             asyncio.run_coroutine_threadsafe(
                 status_message.edit_text(text),
-                client.loop,
+                client.loop
             )
         except Exception:
             pass
@@ -195,56 +156,26 @@ def progress_hook(user_id, status_message, client):
     return hook
 
 
-async def show_quality_buttons(
-    status_msg,
-    user_id: int,
-    url: str,
-    title: str,
-    has_audio: bool = True,
-    note: str = "",
-):
-    PENDING[user_id] = {
-        "url": url,
-        "title": title,
-        "has_audio": has_audio,
-    }
-    safe_title = html.escape(title[:300])
-    extra_note = f"\n⚠️ <i>{html.escape(note[:450])}</i>" if note else ""
-
-    await status_msg.edit_text(
-        f"🎬 <b>{safe_title}</b>{extra_note}\n\n"
-        "👇 <b>Select a quality or Audio MP3 first. "
-        "Downloading will start only after you click a button.</b>",
-        reply_markup=quality_keyboard(has_audio),
-        parse_mode=ParseMode.HTML,
-    )
-
-
 async def fetch_link(message, url):
     user_id = message.from_user.id
 
     if user_id in FETCHING:
         await message.reply_text(
-            "⏳ Your previous link is still being checked. Please wait."
+            "⏳ നിങ്ങളുടെ മുമ്പത്തെ ലിങ്ക് പരിശോധിച്ചുകൊണ്ടിരിക്കുന്നു. കാത്തിരിക്കുക."
         )
         return
 
     if user_id in DOWNLOADING:
         await message.reply_text(
-            "⏳ Please wait until the current download finishes."
+            "⏳ മുമ്പത്തെ ഡൗൺലോഡ് തീരുന്നതുവരെ കാത്തിരിക്കുക."
         )
         return
 
     FETCHING.add(user_id)
 
     status = await message.reply_text(
-        "⏳ Preparing quality options..."
+        "⏳ വീഡിയോ വിവരങ്ങളും ലഭ്യമായ ക്വാളിറ്റികളും പരിശോധിക്കുന്നു... പരമാവധി 2 മിനിറ്റ് കാത്തിരിക്കുക."
     )
-
-    sunnxt_note = ""
-    if is_sunnxt_url(url):
-        sunnxt_note = sunnxt_support_requirements(url)
-        log.info(sunnxt_note)
 
     try:
         opts = ydl_base_options()
@@ -259,41 +190,60 @@ async def fetch_link(message, url):
 
         info = await asyncio.wait_for(
             asyncio.to_thread(extract),
-            timeout=15,
+            timeout=120
         )
 
-        if info and info.get("has_drm"):
+        if not info:
+            raise RuntimeError("വീഡിയോ വിവരങ്ങൾ ലഭിച്ചില്ല.")
+
+        if info.get("has_drm"):
             await status.edit_text(
-                "🔒 This media is DRM-protected, "
-                "so download quality buttons cannot be provided."
+                "🔒 ഈ മീഡിയ DRM സംരക്ഷണമുള്ളതാണ്. "
+                "അതുകൊണ്ട് ഡൗൺലോഡ് ക്വാളിറ്റി ബട്ടണുകൾ നൽകാനാവില്ല."
             )
             return
 
-        title = str((info or {}).get("title") or ("Sun NXT Link" if is_sunnxt_url(url) else "Video Link"))
-        await show_quality_buttons(
-            status,
-            user_id,
-            url,
-            title=title,
-            has_audio=True,
-            note=sunnxt_note,
+        available = get_formats(info)
+
+        if not available:
+            await status.edit_text(
+                "❌ ഡൗൺലോഡ് ചെയ്യാവുന്ന non-DRM വീഡിയോ ഫോർമാറ്റുകൾ ലഭിച്ചില്ല.\n\n"
+                "സൈറ്റ് പിന്തുണയില്ലാത്തതോ, login ആവശ്യമുള്ളതോ, "
+                "DRM സംരക്ഷണമുള്ളതോ ആകാം."
+            )
+            return
+
+        PENDING[user_id] = {
+            "url": url,
+            "title": str(info.get("title") or "OTT Video"),
+            "formats": {
+                height: str(fmt["format_id"])
+                for height, fmt in available.items()
+            },
+        }
+
+        title = html.escape(PENDING[user_id]["title"][:300])
+
+        await status.edit_text(
+            f"🎬 <b>{title}</b>\n\n"
+            "👇 <b>ആദ്യം നിങ്ങൾക്ക് വേണ്ട ക്വാളിറ്റി തിരഞ്ഞെടുക്കുക. "
+            "അതിനുശേഷം മാത്രമേ ഡൗൺലോഡ് ആരംഭിക്കൂ.</b>",
+            reply_markup=quality_keyboard(available),
+            parse_mode=ParseMode.HTML,
+        )
+
+    except asyncio.TimeoutError:
+        await status.edit_text(
+            "⌛ 120 സെക്കൻഡിനുള്ളിൽ വീഡിയോ വിവരങ്ങൾ ലഭിച്ചില്ല. പിന്നീട് വീണ്ടും ശ്രമിക്കുക."
         )
 
     except Exception as exc:
-        err_clean = ANSI_ESCAPE_RE.sub("", str(exc)).strip()
-        log.warning("Metadata pre-check note for %s: %s", url, err_clean)
-        combined_note = (
-            f"{sunnxt_note}\n{err_clean}".strip()
-            if sunnxt_note
-            else err_clean
-        )
-        await show_quality_buttons(
-            status,
-            user_id,
-            url,
-            title="Sun NXT Link" if is_sunnxt_url(url) else "Video Link",
-            has_audio=True,
-            note=combined_note,
+        log.exception("Metadata extraction failed")
+        reason = html.escape(str(exc)[:700])
+
+        await status.edit_text(
+            f"❌ Could not fetch video info.\n\n<code>{reason}</code>",
+            parse_mode=ParseMode.HTML
         )
 
     finally:
@@ -302,28 +252,24 @@ async def fetch_link(message, url):
 
 @app.on_message(filters.private & filters.command("start"))
 async def start_handler(client, message):
-    examples_text = "\n".join(f"• {u}" for u in SUNNXT_EXAMPLE_URLS)
     await message.reply_text(
         "🎬 OTT Video Bot\n\n"
-        "Send a video link to see quality and Audio MP3 buttons first.\n"
-        "Downloading starts only after you select an option.\n\n"
-        f"Example Sun NXT URLs:\n{examples_text}\n\n"
-        "/help - Help\n"
-        "/status - Current status\n"
-        "/cancel - Cancel download"
+        "വീഡിയോ ലിങ്ക് അയക്കുക. ആദ്യം ലഭ്യമായ Quality Buttons കാണിക്കും.\n"
+        "നിങ്ങൾ ഒരു ക്വാളിറ്റി തിരഞ്ഞെടുക്കുമ്പോൾ മാത്രമേ ഡൗൺലോഡ് തുടങ്ങൂ.\n\n"
+        "/help - സഹായം\n"
+        "/status - നിലവിലെ ഡൗൺലോഡ്\n"
+        "/cancel - ഡൗൺലോഡ് റദ്ദാക്കുക"
     )
 
 
 @app.on_message(filters.private & filters.command("help"))
 async def help_handler(client, message):
-    examples_text = "\n".join(f"• {u}" for u in SUNNXT_EXAMPLE_URLS)
     await message.reply_text(
-        "Send a link directly or use /rip URL.\n\n"
-        "1. Quality buttons and Audio MP3 button are shown first.\n"
-        "2. Downloading starts only after you click a button.\n\n"
-        f"Examples:\n{examples_text}\n\n"
-        "Note: Sun NXT web URLs require yt-dlp support, valid session/cookies, "
-        "and non-DRM streams; DRM or login/access restrictions are not bypassed."
+        "ലിങ്ക് നേരിട്ട് അയക്കുക അല്ലെങ്കിൽ /rip URL ഉപയോഗിക്കുക.\n\n"
+        "1. ബോട്ട് വീഡിയോ വിവരങ്ങൾ പരിശോധിക്കും.\n"
+        "2. ലഭ്യമായ ക്വാളിറ്റികൾ ബട്ടണുകളായി കാണിക്കും.\n"
+        "3. ബട്ടൺ അമർത്തിയാൽ മാത്രമേ ഡൗൺലോഡ് തുടങ്ങൂ.\n\n"
+        "DRM സംരക്ഷണമോ login/access നിയന്ത്രണമോ മറികടക്കില്ല."
     )
 
 
@@ -333,15 +279,15 @@ async def status_handler(client, message):
 
     if uid in DOWNLOADING:
         await message.reply_text(
-            "⬇️ Your download is currently in progress."
+            "⬇️ നിങ്ങളുടെ ഡൗൺലോഡ് ഇപ്പോൾ പ്രവർത്തിക്കുന്നു."
         )
     elif uid in FETCHING:
         await message.reply_text(
-            "⏳ Preparing quality options."
+            "⏳ വീഡിയോ വിവരങ്ങൾ പരിശോധിക്കുന്നു."
         )
     else:
         await message.reply_text(
-            "📭 No active download right now."
+            "📭 ഇപ്പോൾ സജീവമായ ഡൗൺലോഡ് ഇല്ല."
         )
 
 
@@ -352,11 +298,11 @@ async def cancel_handler(client, message):
     if uid in DOWNLOADING:
         CANCELLED.add(uid)
         await message.reply_text(
-            "🛑 Cancellation requested for your current download."
+            "🛑 ഡൗൺലോഡ് റദ്ദാക്കാനുള്ള അഭ്യർത്ഥന നൽകി."
         )
     else:
         await message.reply_text(
-            "There is no active download to cancel."
+            "ഇപ്പോൾ റദ്ദാക്കാനുള്ള ഡൗൺലോഡ് ഇല്ല."
         )
 
 
@@ -367,22 +313,18 @@ async def rip_handler(client, message):
     url = next(
         (
             x for x in args
-            if x.startswith(("https://", "http://")) or "sunnxt.com" in x.lower()
+            if x.startswith(("https://", "http://"))
         ),
-        None,
+        None
     )
 
     if not url:
         await message.reply_text(
-            "Usage: /rip https://www.sunnxt.com/suntv-malayalam-serial-kanyadaanam-nov-01-2026-episodeno1835-Nov01-2026/detail/122855/281312"
+            "ഉപയോഗം: /rip https://example.com/video-link"
         )
         return
 
-    cleaned_url = url.rstrip(".,);]>")
-    if not cleaned_url.startswith(("https://", "http://")):
-        cleaned_url = f"https://{cleaned_url}"
-
-    await fetch_link(message, cleaned_url)
+    await fetch_link(message, url.rstrip(".,);]>"))
 
 
 @app.on_message(
@@ -391,101 +333,81 @@ async def rip_handler(client, message):
     & ~filters.command(["start", "help", "status", "cancel", "rip"])
 )
 async def link_handler(client, message):
-    text = message.text or ""
-    match = re.search(r"https?://[^\s]+", text)
+    match = re.search(
+        r"https?://[^\s]+",
+        message.text or ""
+    )
 
-    if match:
-        url = match.group(0).rstrip(".,);]>")
-    elif "sunnxt.com" in text.lower():
-        sun_match = re.search(r"(?:www\.)?sunnxt\.com[^\s]*", text, flags=re.IGNORECASE)
-        url = f"https://{sun_match.group(0).rstrip('.,);]>')}" if sun_match else "https://www.sunnxt.com"
-    else:
+    if not match:
         await message.reply_text(
-            "❌ Please send a valid video link."
+            "❌ ദയവായി സാധുവായ വീഡിയോ ലിങ്ക് അയക്കുക."
         )
         return
 
-    await fetch_link(message, url)
-
-
-def find_downloaded_file(ydl, info, uid: int, expected_exts: tuple):
-    candidates = []
-
-    for item in info.get("requested_downloads") or []:
-        path = item.get("filepath") or item.get("_filename")
-        if path:
-            candidates.append(path)
-
-    if info.get("_filename"):
-        candidates.append(info["_filename"])
-
-    try:
-        candidates.append(ydl.prepare_filename(info))
-    except Exception:
-        pass
-
-    for candidate in candidates:
-        if os.path.isfile(candidate):
-            return candidate
-
-        stem = os.path.splitext(candidate)[0]
-        for ext in expected_exts:
-            if os.path.isfile(stem + ext):
-                return stem + ext
-
-    matches = sorted(
-        DOWNLOAD_DIR.glob(f"*_{uid}_*"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
+    await fetch_link(
+        message,
+        match.group(0).rstrip(".,);]>")
     )
-    return str(matches[0]) if matches else None
 
 
-@app.on_callback_query(filters.regex(r"^quality:(?:\d+|mp3)$"))
+@app.on_callback_query(filters.regex(r"^quality:\d+$"))
 async def quality_callback(client, callback: CallbackQuery):
     uid = callback.from_user.id
     pending = PENDING.get(uid)
 
     if not pending:
         await callback.answer(
-            "Link expired. Please send the link again.",
-            show_alert=True,
+            "ലിങ്ക് കാലഹരണപ്പെട്ടു. വീണ്ടും ലിങ്ക് അയക്കുക.",
+            show_alert=True
         )
         return
 
     if uid in DOWNLOADING:
         await callback.answer(
-            "A download is already in progress.",
-            show_alert=True,
+            "ഒരു ഡൗൺലോഡ് ഇതിനകം നടക്കുന്നു.",
+            show_alert=True
         )
         return
 
-    choice = callback.data.split(":", 1)[1]
-    is_audio = choice == "mp3"
+    height = int(callback.data.split(":", 1)[1])
+    format_id = pending["formats"].get(height)
 
-    label = "Audio MP3" if is_audio else f"{int(choice)}p"
+    if not format_id:
+        await callback.answer(
+            "ഈ ക്വാളിറ്റി ഇപ്പോൾ ലഭ്യമല്ല.",
+            show_alert=True
+        )
+        return
+
     await callback.answer(
-        f"Selected {label}. Starting download..."
+        f"{height}p തിരഞ്ഞെടുത്തു. ഡൗൺലോഡ് ആരംഭിക്കുന്നു..."
     )
 
     DOWNLOADING.add(uid)
     CANCELLED.discard(uid)
 
     status = await callback.message.reply_text(
-        f"⏳ Starting {label} download..."
+        f"⏳ {height}p ഡൗൺലോഡ് തയ്യാറാക്കുന്നു..."
     )
 
     filename = None
 
     try:
         output_template = str(
-            DOWNLOAD_DIR
-            / f"%(title).150B_{uid}_{uuid.uuid4().hex[:8]}.%(ext)s"
+            DOWNLOAD_DIR /
+            f"%(title).150B_{uid}_{uuid.uuid4().hex[:8]}.%(ext)s"
         )
 
         opts = ydl_base_options()
+
         opts.update({
+            "format": (
+                f"{format_id}+bestaudio/{format_id}/"
+                f"bestvideo[height<={height}]+bestaudio/"
+                f"best[height<={height}]"
+            ),
             "outtmpl": output_template,
+            "merge_output_format": "mp4",
             "continuedl": True,
             "concurrent_fragment_downloads": 4,
             "progress_hooks": [
@@ -493,37 +415,50 @@ async def quality_callback(client, callback: CallbackQuery):
             ],
         })
 
-        if is_audio:
-            opts.update({
-                "format": "bestaudio/best",
-                "postprocessors": [
-                    {
-                        "key": "FFmpegExtractAudio",
-                        "preferredcodec": "mp3",
-                        "preferredquality": "192",
-                    }
-                ],
-            })
-            expected_exts = (".mp3", ".m4a", ".opus", ".ogg", ".wav")
-        else:
-            height = int(choice)
-            opts.update({
-                "format": (
-                    f"bestvideo[height={height}]+bestaudio/"
-                    f"bestvideo[height<={height}]+bestaudio/"
-                    f"best[height<={height}]/best"
-                ),
-                "merge_output_format": "mp4",
-            })
-            expected_exts = (".mp4", ".mkv", ".webm", ".mov")
-
         def download():
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(
                     pending["url"],
-                    download=True,
+                    download=True
                 )
-                return find_downloaded_file(ydl, info, uid, expected_exts)
+
+                candidates = []
+
+                for item in info.get("requested_downloads") or []:
+                    path = item.get("filepath") or item.get("_filename")
+                    if path:
+                        candidates.append(path)
+
+                if info.get("_filename"):
+                    candidates.append(info["_filename"])
+
+                try:
+                    candidates.append(ydl.prepare_filename(info))
+                except Exception:
+                    pass
+
+                for candidate in candidates:
+                    if os.path.isfile(candidate):
+                        return candidate
+
+                    stem = os.path.splitext(candidate)[0]
+
+                    for ext in (
+                        ".mp4",
+                        ".mkv",
+                        ".webm",
+                        ".mov"
+                    ):
+                        if os.path.isfile(stem + ext):
+                            return stem + ext
+
+                matches = sorted(
+                    DOWNLOAD_DIR.glob(f"*_{uid}_*"),
+                    key=lambda p: p.stat().st_mtime,
+                    reverse=True
+                )
+
+                return str(matches[0]) if matches else None
 
         filename = await asyncio.to_thread(download)
 
@@ -532,35 +467,22 @@ async def quality_callback(client, callback: CallbackQuery):
 
         if not filename or not os.path.isfile(filename):
             raise RuntimeError(
-                "Downloaded file could not be found."
+                "ഡൗൺലോഡ് ഫയൽ കണ്ടെത്താനായില്ല."
             )
 
         await status.edit_text(
-            f"📤 Uploading {label} to Telegram..."
+            "📤 വീഡിയോ Telegram-ലേക്ക് അപ്‌ലോഡ് ചെയ്യുന്നു..."
         )
 
-        safe_title = html.escape(pending["title"][:200])
-
-        if is_audio:
-            await client.send_audio(
-                chat_id=callback.message.chat.id,
-                audio=filename,
-                title=pending["title"][:120],
-                caption=(
-                    f"🎵 {safe_title}\n"
-                    f"Format: MP3"
-                ),
-            )
-        else:
-            await client.send_video(
-                chat_id=callback.message.chat.id,
-                video=filename,
-                caption=(
-                    f"📹 {safe_title}\n"
-                    f"Quality: {label}"
-                ),
-                supports_streaming=True,
-            )
+        await client.send_video(
+            chat_id=callback.message.chat.id,
+            video=filename,
+            caption=(
+                f"📹 {html.escape(pending['title'][:200])}\n"
+                f"Quality: {height}p"
+            ),
+            supports_streaming=True,
+        )
 
         await status.delete()
 
@@ -568,26 +490,22 @@ async def quality_callback(client, callback: CallbackQuery):
         log.exception("Download failed")
 
         if uid in CANCELLED or "cancel" in str(exc).lower():
-            text = "❌ Download cancelled."
+            text = "❌ ഡൗൺലോഡ് റദ്ദാക്കി."
         else:
-            extra_info = ""
-            if is_sunnxt_url(pending["url"]):
-                extra_info = "\n\n" + html.escape(sunnxt_support_requirements(pending["url"]))
             text = (
-                "❌ Download failed.\n\n"
-                + f"<code>{clean_error_text(exc, 800)}</code>"
-                + extra_info
+                "❌ ഡൗൺലോഡ് പരാജയപ്പെട്ടു.\n\n"
+                + html.escape(str(exc)[:800])
             )
 
         try:
             await status.edit_text(
                 text,
-                parse_mode=ParseMode.HTML,
+                parse_mode=ParseMode.HTML
             )
         except Exception:
             await callback.message.reply_text(
                 text,
-                parse_mode=ParseMode.HTML,
+                parse_mode=ParseMode.HTML
             )
 
     finally:
@@ -604,6 +522,6 @@ async def quality_callback(client, callback: CallbackQuery):
 if __name__ == "__main__":
     print(
         "🤖 Bot running. Send a video URL; "
-        "quality / MP3 selection comes before download."
+        "quality selection comes before download."
     )
     app.run()
