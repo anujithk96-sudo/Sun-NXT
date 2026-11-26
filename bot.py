@@ -44,6 +44,7 @@ CANCELLED = set()
 DOWNLOAD_DIR = Path("downloads")
 DOWNLOAD_DIR.mkdir(exist_ok=True)
 
+TARGET_QUALITIES = [1080, 720, 476, 360, 144, 140, 120]
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m|\[\d+(?:;\d+)*m")
 
 
@@ -69,20 +70,27 @@ def ydl_base_options():
     return opts
 
 
-def get_formats(info):
-    """Return the best real, non-DRM video format for each available height."""
-    found = {}
-    formats = info.get("formats") or []
+def inspect_media(info):
+    """Inspect non-DRM video heights and check if audio stream exists."""
+    heights = set()
+    has_audio = False
 
+    formats = info.get("formats") or []
     if not formats and info.get("format_id"):
         formats = [info]
 
     for fmt in formats:
         if fmt.get("has_drm"):
             continue
-        if not fmt.get("format_id") or fmt.get("vcodec") == "none":
-            continue
         if not (fmt.get("url") or fmt.get("manifest_url") or fmt.get("protocol")):
+            continue
+
+        acodec = fmt.get("acodec")
+        if acodec and acodec != "none":
+            has_audio = True
+
+        vcodec = fmt.get("vcodec")
+        if not fmt.get("format_id") or vcodec == "none":
             continue
 
         height = fmt.get("height")
@@ -93,36 +101,28 @@ def get_formats(info):
 
         try:
             height = int(height)
+            if height > 0:
+                heights.add(height)
         except (TypeError, ValueError):
             continue
 
-        old = found.get(height)
-        score = (
-            fmt.get("filesize") or fmt.get("filesize_approx") or 0,
-            1 if fmt.get("acodec") != "none" else 0,
-        )
-        old_score = (
-            (
-                old.get("filesize") or old.get("filesize_approx") or 0,
-                1 if old.get("acodec") != "none" else 0,
-            )
-            if old
-            else (-1, -1)
-        )
-
-        if old is None or score > old_score:
-            found[height] = fmt
-
-    return found
+    return heights, has_audio
 
 
-def quality_keyboard(qualities):
+def quality_keyboard(has_audio: bool):
     rows = []
-    for height in sorted(qualities, reverse=True):
+    for height in TARGET_QUALITIES:
         rows.append([
             InlineKeyboardButton(
                 f"📹 {height}p",
                 callback_data=f"quality:{height}",
+            )
+        ])
+    if has_audio:
+        rows.append([
+            InlineKeyboardButton(
+                "🎵 Audio MP3",
+                callback_data="quality:mp3",
             )
         ])
     return InlineKeyboardMarkup(rows)
@@ -184,7 +184,7 @@ async def fetch_link(message, url):
     FETCHING.add(user_id)
 
     status = await message.reply_text(
-        "⏳ വീഡിയോ വിവരങ്ങളും ലഭ്യമായ ക്വാളിറ്റികളും പരിശോധിക്കുന്നു... പരമാവധി 2 മിനിറ്റ് കാത്തിരിക്കുക."
+        "⏳ വീഡിയോ വിവരങ്ങൾ പരിശോധിക്കുന്നു... പരമാവധി 2 മിനിറ്റ് കാത്തിരിക്കുക."
     )
 
     try:
@@ -213,11 +213,11 @@ async def fetch_link(message, url):
             )
             return
 
-        available = get_formats(info)
+        heights, has_audio = inspect_media(info)
 
-        if not available:
+        if not heights and not has_audio:
             await status.edit_text(
-                "❌ ഡൗൺലോഡ് ചെയ്യാവുന്ന non-DRM വീഡിയോ ഫോർമാറ്റുകൾ ലഭിച്ചില്ല.\n\n"
+                "❌ ഡൗൺലോഡ് ചെയ്യാവുന്ന non-DRM മീഡിയ ഫോർമാറ്റുകൾ ലഭിച്ചില്ല.\n\n"
                 "സൈറ്റ് പിന്തുണയില്ലാത്തതോ, login ആവശ്യമുള്ളതോ, "
                 "DRM സംരക്ഷണമുള്ളതോ ആകാം."
             )
@@ -226,19 +226,17 @@ async def fetch_link(message, url):
         PENDING[user_id] = {
             "url": url,
             "title": str(info.get("title") or "OTT Video"),
-            "formats": {
-                height: str(fmt["format_id"])
-                for height, fmt in available.items()
-            },
+            "heights": sorted(heights),
+            "has_audio": has_audio,
         }
 
         title = html.escape(PENDING[user_id]["title"][:300])
 
         await status.edit_text(
             f"🎬 <b>{title}</b>\n\n"
-            "👇 <b>ആദ്യം നിങ്ങൾക്ക് വേണ്ട ക്വാളിറ്റി തിരഞ്ഞെടുക്കുക. "
+            "👇 <b>ആദ്യം നിങ്ങൾക്ക് വേണ്ട ക്വാളിറ്റി അല്ലെങ്കിൽ Audio MP3 തിരഞ്ഞെടുക്കുക. "
             "അതിനുശേഷം മാത്രമേ ഡൗൺലോഡ് ആരംഭിക്കൂ.</b>",
-            reply_markup=quality_keyboard(available),
+            reply_markup=quality_keyboard(has_audio),
             parse_mode=ParseMode.HTML,
         )
 
@@ -264,8 +262,8 @@ async def fetch_link(message, url):
 async def start_handler(client, message):
     await message.reply_text(
         "🎬 OTT Video Bot\n\n"
-        "വീഡിയോ ലിങ്ക് അയക്കുക. ആദ്യം ലഭ്യമായ Quality Buttons കാണിക്കും.\n"
-        "നിങ്ങൾ ഒരു ക്വാളിറ്റി തിരഞ്ഞെടുക്കുമ്പോൾ മാത്രമേ ഡൗൺലോഡ് തുടങ്ങൂ.\n\n"
+        "വീഡിയോ ലിങ്ക് അയക്കുക. ആദ്യം Quality / Audio MP3 ബട്ടണുകൾ കാണിക്കും.\n"
+        "നിങ്ങൾ ഒരു ബട്ടൺ തിരഞ്ഞെടുക്കുമ്പോൾ മാത്രമേ ഡൗൺലോഡ് തുടങ്ങൂ.\n\n"
         "/help - സഹായം\n"
         "/status - നിലവിലെ ഡൗൺലോഡ്\n"
         "/cancel - ഡൗൺലോഡ് റദ്ദാക്കുക"
@@ -277,7 +275,7 @@ async def help_handler(client, message):
     await message.reply_text(
         "ലിങ്ക് നേരിട്ട് അയക്കുക അല്ലെങ്കിൽ /rip URL ഉപയോഗിക്കുക.\n\n"
         "1. ബോട്ട് വീഡിയോ വിവരങ്ങൾ പരിശോധിക്കും.\n"
-        "2. ലഭ്യമായ ക്വാളിറ്റികൾ ബട്ടണുകളായി കാണിക്കും.\n"
+        "2. ക്വാളിറ്റി ബട്ടണുകളും Audio MP3 ബട്ടണും കാണിക്കും.\n"
         "3. ബട്ടൺ അമർത്തിയാൽ മാത്രമേ ഡൗൺലോഡ് തുടങ്ങൂ.\n\n"
         "DRM സംരക്ഷണമോ login/access നിയന്ത്രണമോ മറികടക്കില്ല."
     )
@@ -360,7 +358,40 @@ async def link_handler(client, message):
     )
 
 
-@app.on_callback_query(filters.regex(r"^quality:\d+$"))
+def find_downloaded_file(ydl, info, uid: int, expected_exts: tuple):
+    candidates = []
+
+    for item in info.get("requested_downloads") or []:
+        path = item.get("filepath") or item.get("_filename")
+        if path:
+            candidates.append(path)
+
+    if info.get("_filename"):
+        candidates.append(info["_filename"])
+
+    try:
+        candidates.append(ydl.prepare_filename(info))
+    except Exception:
+        pass
+
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
+
+        stem = os.path.splitext(candidate)[0]
+        for ext in expected_exts:
+            if os.path.isfile(stem + ext):
+                return stem + ext
+
+    matches = sorted(
+        DOWNLOAD_DIR.glob(f"*_{uid}_*"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    return str(matches[0]) if matches else None
+
+
+@app.on_callback_query(filters.regex(r"^quality:(?:\d+|mp3)$"))
 async def quality_callback(client, callback: CallbackQuery):
     uid = callback.from_user.id
     pending = PENDING.get(uid)
@@ -379,25 +410,26 @@ async def quality_callback(client, callback: CallbackQuery):
         )
         return
 
-    height = int(callback.data.split(":", 1)[1])
-    format_id = pending["formats"].get(height)
+    choice = callback.data.split(":", 1)[1]
+    is_audio = choice == "mp3"
 
-    if not format_id:
+    if is_audio and not pending.get("has_audio"):
         await callback.answer(
-            "ഈ ക്വാളിറ്റി ഇപ്പോൾ ലഭ്യമല്ല.",
+            "ഈ വീഡിയോയിൽ ഓഡിയോ ലഭ്യമല്ല.",
             show_alert=True,
         )
         return
 
+    label = "Audio MP3" if is_audio else f"{int(choice)}p"
     await callback.answer(
-        f"{height}p തിരഞ്ഞെടുത്തു. ഡൗൺലോഡ് ആരംഭിക്കുന്നു..."
+        f"{label} തിരഞ്ഞെടുത്തു. ഡൗൺലോഡ് ആരംഭിക്കുന്നു..."
     )
 
     DOWNLOADING.add(uid)
     CANCELLED.discard(uid)
 
     status = await callback.message.reply_text(
-        f"⏳ {height}p ഡൗൺലോഡ് തയ്യാറാക്കുന്നു..."
+        f"⏳ {label} ഡൗൺലോഡ് തയ്യാറാക്കുന്നു..."
     )
 
     filename = None
@@ -409,15 +441,8 @@ async def quality_callback(client, callback: CallbackQuery):
         )
 
         opts = ydl_base_options()
-
         opts.update({
-            "format": (
-                f"{format_id}+bestaudio/{format_id}/"
-                f"bestvideo[height<={height}]+bestaudio/"
-                f"best[height<={height}]"
-            ),
             "outtmpl": output_template,
-            "merge_output_format": "mp4",
             "continuedl": True,
             "concurrent_fragment_downloads": 4,
             "progress_hooks": [
@@ -425,50 +450,37 @@ async def quality_callback(client, callback: CallbackQuery):
             ],
         })
 
+        if is_audio:
+            opts.update({
+                "format": "bestaudio/best",
+                "postprocessors": [
+                    {
+                        "key": "FFmpegExtractAudio",
+                        "preferredcodec": "mp3",
+                        "preferredquality": "192",
+                    }
+                ],
+            })
+            expected_exts = (".mp3", ".m4a", ".opus", ".ogg", ".wav")
+        else:
+            height = int(choice)
+            opts.update({
+                "format": (
+                    f"bestvideo[height={height}]+bestaudio/"
+                    f"bestvideo[height<={height}]+bestaudio/"
+                    f"best[height<={height}]/best"
+                ),
+                "merge_output_format": "mp4",
+            })
+            expected_exts = (".mp4", ".mkv", ".webm", ".mov")
+
         def download():
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(
                     pending["url"],
                     download=True,
                 )
-
-                candidates = []
-
-                for item in info.get("requested_downloads") or []:
-                    path = item.get("filepath") or item.get("_filename")
-                    if path:
-                        candidates.append(path)
-
-                if info.get("_filename"):
-                    candidates.append(info["_filename"])
-
-                try:
-                    candidates.append(ydl.prepare_filename(info))
-                except Exception:
-                    pass
-
-                for candidate in candidates:
-                    if os.path.isfile(candidate):
-                        return candidate
-
-                    stem = os.path.splitext(candidate)[0]
-
-                    for ext in (
-                        ".mp4",
-                        ".mkv",
-                        ".webm",
-                        ".mov",
-                    ):
-                        if os.path.isfile(stem + ext):
-                            return stem + ext
-
-                matches = sorted(
-                    DOWNLOAD_DIR.glob(f"*_{uid}_*"),
-                    key=lambda p: p.stat().st_mtime,
-                    reverse=True,
-                )
-
-                return str(matches[0]) if matches else None
+                return find_downloaded_file(ydl, info, uid, expected_exts)
 
         filename = await asyncio.to_thread(download)
 
@@ -481,18 +493,31 @@ async def quality_callback(client, callback: CallbackQuery):
             )
 
         await status.edit_text(
-            "📤 വീഡിയോ Telegram-ലേക്ക് അപ്‌ലോഡ് ചെയ്യുന്നു..."
+            f"📤 {label} Telegram-ലേക്ക് അപ്‌ലോഡ് ചെയ്യുന്നു..."
         )
 
-        await client.send_video(
-            chat_id=callback.message.chat.id,
-            video=filename,
-            caption=(
-                f"📹 {html.escape(pending['title'][:200])}\n"
-                f"Quality: {height}p"
-            ),
-            supports_streaming=True,
-        )
+        safe_title = html.escape(pending["title"][:200])
+
+        if is_audio:
+            await client.send_audio(
+                chat_id=callback.message.chat.id,
+                audio=filename,
+                title=pending["title"][:120],
+                caption=(
+                    f"🎵 {safe_title}\n"
+                    f"Format: MP3"
+                ),
+            )
+        else:
+            await client.send_video(
+                chat_id=callback.message.chat.id,
+                video=filename,
+                caption=(
+                    f"📹 {safe_title}\n"
+                    f"Quality: {label}"
+                ),
+                supports_streaming=True,
+            )
 
         await status.delete()
 
@@ -532,6 +557,6 @@ async def quality_callback(client, callback: CallbackQuery):
 if __name__ == "__main__":
     print(
         "🤖 Bot running. Send a video URL; "
-        "quality selection comes before download."
+        "quality / MP3 selection comes before download."
     )
     app.run()
